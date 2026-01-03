@@ -1,0 +1,16 @@
+<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <!-- Orange Circle Background -->
+  <circle cx="50" cy="50" r="50" fill="#FF6B35"/>
+  
+  <!-- White Q Letter - Clean and Simple -->
+  <text 
+    x="50" 
+    y="72" 
+    font-family="Georgia, serif" 
+    font-size="60" 
+    font-weight="bold" 
+    text-anchor="middle" 
+    fill="white"
+  >Q</text>
+</svg>
+
