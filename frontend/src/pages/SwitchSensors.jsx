@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie } from 'recharts';
+import { ComposedChart, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, ReferenceArea } from 'recharts';
 import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
 import io from 'socket.io-client';
@@ -20,6 +20,7 @@ const SwitchSensors = () => {
   const [lastUpdateTime, setLastUpdateTime] = useState(null);
   const [lastPayloadTime, setLastPayloadTime] = useState(null);
   const [updateCount, setUpdateCount] = useState(0);
+  const [payloadTimeoutMinutes, setPayloadTimeoutMinutes] = useState(5); // Configurable timeout from settings (default 5 minutes)
   const fetchingTimelineRef = useRef(false);
   const lastTimelineFetchRef = useRef({ date: null, sensorCount: 0 });
 
@@ -27,7 +28,25 @@ const SwitchSensors = () => {
   useEffect(() => {
     initializeSensors();
     fetchShifts();
+    fetchSystemSettings();
   }, []);
+
+  // Fetch system settings (timeout configuration)
+  const fetchSystemSettings = async () => {
+    try {
+      const response = await api.get('/settings');
+      const settings = response.data;
+      if (settings.payload_timeout_minutes?.value) {
+        const timeoutValue = parseFloat(settings.payload_timeout_minutes.value);
+        if (!isNaN(timeoutValue) && timeoutValue > 0) {
+          setPayloadTimeoutMinutes(timeoutValue);
+          console.log(`✓ SwitchSensors: Loaded payload timeout: ${timeoutValue} minutes`);
+        }
+      }
+    } catch (error) {
+      console.warn('⚠️ Could not load system settings, using default timeout:', error.message);
+    }
+  };
 
   // Set initial shift based on user role
   useEffect(() => {
@@ -462,36 +481,57 @@ const SwitchSensors = () => {
       const response = await api.get(`/data/latest?sensor_ids=${sensorIds}`);
       console.log('📡 Latest sensor data received:', response.data);
       
-      // Check if any recent data exists (within last 5 minutes) to determine if system is "Live"
-      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-      let hasRecentData = false;
+      // Check if any recent data exists (within configured timeout) to determine if system is "Live"
+      const timeoutMs = payloadTimeoutMinutes * 60 * 1000;
+      const timeoutAgo = new Date(Date.now() - timeoutMs);
+      let hasRecentLiveData = false;
+      let latestLiveDataTime = null;
+      let hasRecentOfflineData = false;
+      let latestOfflineDataTime = null;
       let latestDataTime = null;
       
       if (response.data && response.data.length > 0) {
         response.data.forEach(d => {
           if (d.timestamp) {
             const dataTime = new Date(d.timestamp);
-            if (dataTime >= fiveMinutesAgo) {
-              hasRecentData = true;
+            const isRecent = dataTime >= timeoutAgo;
+            
+            if (isRecent) {
+              // Track the latest data time regardless of status
               if (!latestDataTime || dataTime > latestDataTime) {
                 latestDataTime = dataTime;
+              }
+              
+              // Check data_status to determine if it's live or offline
+              if (d.data_status === 'live') {
+                hasRecentLiveData = true;
+                if (!latestLiveDataTime || dataTime > latestLiveDataTime) {
+                  latestLiveDataTime = dataTime;
+                }
+              } else if (d.data_status === 'offline') {
+                hasRecentOfflineData = true;
+                if (!latestOfflineDataTime || dataTime > latestOfflineDataTime) {
+                  latestOfflineDataTime = dataTime;
+                }
               }
             }
           }
         });
       }
       
-      // Only set payloadReceived if we have recent data (within 5 minutes)
-      if (hasRecentData && latestDataTime) {
+      // Set payloadReceived based on data_status: true only if we have recent LIVE data
+      // If we only have offline data or no recent data, set to false
+      if (hasRecentLiveData && latestLiveDataTime) {
         setPayloadReceived(true);
-        setLastPayloadTime(latestDataTime);
-        console.log('✅ Recent payload data found - marking as Live');
+        setLastPayloadTime(latestLiveDataTime);
+        console.log('✅ Recent live payload data found - marking as Live');
         
         // Only set active sensor states if we have recent live data
         const activeSensorData = response.data.find(d => {
           if (!d.timestamp) return false;
           const dataTime = new Date(d.timestamp);
-          if (dataTime < fiveMinutesAgo) return false; // Ignore old data
+          if (dataTime < timeoutAgo) return false; // Ignore old data
+          if (d.data_status !== 'live') return false; // Only consider live data
           
           const value = parseFloat(d.value);
           return value === 1 || value === "1" || d.value === 1 || d.value === "1";
@@ -519,17 +559,26 @@ const SwitchSensors = () => {
           );
         }
       } else {
-        // No recent data - set to Offline and reset all sensors to inactive
+        // No recent live data - set to Offline and reset all sensors to inactive
         setPayloadReceived(false);
-        setLastPayloadTime(null);
+        
+        // If we have recent offline data, show its timestamp; otherwise null
+        if (hasRecentOfflineData && latestOfflineDataTime) {
+          setLastPayloadTime(latestOfflineDataTime);
+          console.log('⚠️ Recent offline data detected - marking as Offline and resetting sensors');
+        } else {
+          setLastPayloadTime(null);
+          console.log('⚠️ No recent payload data found - marking as Offline and resetting sensors');
+        }
+        
         setActiveSensorId(null);
         setSensors(prevSensors => 
           prevSensors.map(s => ({
             ...s,
-            isActive: false
+            isActive: false,
+            value: 0 // Ensure value is 0 (OFF state)
           }))
         );
-        console.log('⚠️ No recent payload data found - marking as Offline and resetting sensors');
       }
       
       // Log detailed data for debugging
@@ -537,8 +586,9 @@ const SwitchSensors = () => {
         console.log('📡 Latest data details:');
         response.data.forEach(d => {
           const dataTime = d.timestamp ? new Date(d.timestamp) : null;
-          const isRecent = dataTime && dataTime >= fiveMinutesAgo;
-          console.log(`   - Sensor ID: ${d.sensor_id}, Value: ${d.value}, Timestamp: ${d.timestamp} ${isRecent ? '(RECENT)' : '(OLD)'}`);
+          const isRecent = dataTime && dataTime >= timeoutAgo;
+          const status = d.data_status || 'unknown';
+          console.log(`   - Sensor ID: ${d.sensor_id}, Value: ${d.value}, Status: ${status}, Timestamp: ${d.timestamp} ${isRecent ? '(RECENT)' : '(OLD)'}`);
         });
       } else {
         console.log('⚠️  Latest sensor data array is empty - no data in database yet');
@@ -693,12 +743,25 @@ const SwitchSensors = () => {
       console.log('  - Sensor Name:', data.sensor_name);
       console.log('  - Value:', data.value);
       console.log('  - Timestamp:', data.timestamp);
+      console.log('  - Data Status:', data.data_status || 'live (default)');
       console.log('  - Full data object:', JSON.stringify(data, null, 2));
       
-      // Mark that actual payload has been received
-      setPayloadReceived(true);
+      // Check data_status from WebSocket message - only mark as Live if data_status is 'live'
+      const isLiveData = data.data_status === 'live' || !data.data_status; // Default to 'live' if not specified (backward compatibility)
+      
+      // Create now variable before if/else so it's accessible for status indicators
       const now = new Date();
-      setLastPayloadTime(now);
+      
+      if (isLiveData) {
+        // Mark that actual payload has been received (only for live data)
+        setPayloadReceived(true);
+        setLastPayloadTime(now);
+      } else {
+        // If data_status is 'offline', mark as offline
+        console.log('⚠️ SwitchSensors: Received offline status from WebSocket');
+        setPayloadReceived(false);
+        setLastPayloadTime(now);
+      }
       
       // Update status indicators
       setLastUpdateTime(now.toLocaleTimeString());
@@ -901,7 +964,7 @@ const SwitchSensors = () => {
 
   // Periodic check for offline state - if no payload received within timeout, mark as offline
   useEffect(() => {
-    const OFFLINE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes timeout
+    const OFFLINE_TIMEOUT_MS = payloadTimeoutMinutes * 60 * 1000; // Use configurable timeout
     
     const checkOfflineStatus = () => {
       if (payloadReceived && lastPayloadTime) {
@@ -941,7 +1004,7 @@ const SwitchSensors = () => {
     return () => {
       clearInterval(interval);
     };
-  }, [payloadReceived, lastPayloadTime]);
+  }, [payloadReceived, lastPayloadTime, payloadTimeoutMinutes]);
 
 
   // Calculate summary metrics based on filtered data
@@ -1210,7 +1273,7 @@ const SwitchSensors = () => {
       switchCount,
       chartData
     };
-  }, [filteredTimelineData, timelineData, sensors, selectedShift]);
+  }, [filteredTimelineData, timelineData, sensors, selectedShift, payloadReceived, lastPayloadTime]);
 
   // Calculate which shift is currently active based on current time
   const getCurrentActiveShift = useMemo(() => {
@@ -1272,6 +1335,22 @@ const SwitchSensors = () => {
       console.log(`   Re-filtered data points: ${dataToUse.length}`);
     }
     
+    // If offline (no payload received), filter out any data points after the last payload time
+    // This prevents showing historical data bars extending through the entire shift
+    if (!payloadReceived && lastPayloadTime && dataToUse.length > 0) {
+      const cutoffTime = lastPayloadTime.getTime();
+      const originalLength = dataToUse.length;
+      dataToUse = dataToUse.filter(point => {
+        if (point.fullTimestamp) {
+          return new Date(point.fullTimestamp).getTime() <= cutoffTime;
+        } else if (point.timestamp) {
+          return new Date(point.timestamp).getTime() <= cutoffTime;
+        }
+        return true; // Keep if no timestamp available
+      });
+      console.log(`📊 Offline mode: Filtered data from ${originalLength} to ${dataToUse.length} points (cutoff: ${lastPayloadTime.toISOString()})`);
+    }
+    
     // If no data, return empty array but we'll still show the chart with all sensors
     if (!dataToUse.length) {
       console.log(`📊 Timeline bar data: No data for date ${selectedDate}, shift ${selectedShift.name}`);
@@ -1282,8 +1361,9 @@ const SwitchSensors = () => {
     }
     
     console.log(`📊 Processing ${dataToUse.length} timeline points for bar chart`);
-    console.log(`   Selected date: ${selectedDate}`);
-    console.log(`   Selected shift: ${selectedShift.name} (${selectedShift.start_time} - ${selectedShift.end_time})`);
+      console.log(`   Selected date: ${selectedDate}`);
+      console.log(`   Selected shift: ${selectedShift.name} (${selectedShift.start_time} - ${selectedShift.end_time})`);
+      console.log(`   Payload received: ${payloadReceived}, Last payload time: ${lastPayloadTime ? lastPayloadTime.toISOString() : 'None'}`);
 
     // Calculate shift start time in minutes from midnight (actual clock time)
     const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
@@ -1429,23 +1509,76 @@ const SwitchSensors = () => {
       }
     });
 
-    // Close any remaining active periods at shift end (use actual shift end time)
+    // Close any remaining active periods
+    // If offline, close at lastPayloadTime instead of shift end to prevent showing bars beyond last payload
+    let closingTime = shiftEndMinutes;
+    if (!payloadReceived && lastPayloadTime) {
+      const lastPayloadDate = new Date(lastPayloadTime);
+      let lastPayloadMinutes = lastPayloadDate.getHours() * 60 + lastPayloadDate.getMinutes();
+      // Handle overnight shifts
+      if (isOvernight && lastPayloadMinutes < shiftStartMinutes) {
+        // Last payload is on next day (for overnight shifts)
+        lastPayloadMinutes = lastPayloadMinutes + (24 * 60);
+      }
+      closingTime = lastPayloadMinutes;
+      console.log(`📊 Offline mode: Closing bars at lastPayloadTime (${lastPayloadTime.toISOString()}) = ${closingTime} minutes instead of shift end ${shiftEndMinutes}`);
+    }
+    
     Object.keys(sensorActivePeriods).forEach(sensorName => {
       if (sensorActivePeriods[sensorName] !== null) {
-        sensorBars.push({
-          sensor: sensorName,
-          start: sensorActivePeriods[sensorName], // Actual clock time
-          end: shiftEndMinutes, // Actual shift end time (clock minutes)
-          color: COLORS[sensors.findIndex(s => s.name === sensorName) % COLORS.length]
-        });
+        // Only create bar if closing time is after start time
+        if (closingTime > sensorActivePeriods[sensorName]) {
+          sensorBars.push({
+            sensor: sensorName,
+            start: sensorActivePeriods[sensorName], // Actual clock time
+            end: closingTime, // Use closingTime (lastPayloadTime if offline, shiftEndMinutes if live)
+            color: COLORS[sensors.findIndex(s => s.name === sensorName) % COLORS.length]
+          });
+        }
       }
     });
 
     // Filter out bars with zero or negative duration
     const filteredBars = sensorBars.filter(bar => bar.end > bar.start);
-    console.log(`📊 Timeline bar chart: ${filteredBars.length} bars created from ${timelinePoints.length} timeline points`);
-    if (filteredBars.length > 0) {
-      console.log(`   Sample bars:`, filteredBars.slice(0, 5).map(bar => {
+    
+    // Create a map from sensor name to Y-axis index (0-based)
+    // Ensure consistent mapping by using exact name match (case-sensitive)
+    const sensorToIndexMap = {};
+    sensors.forEach((sensor, index) => {
+      sensorToIndexMap[sensor.name] = index;
+      // Also map lowercase version for case-insensitive matching
+      sensorToIndexMap[sensor.name.toLowerCase()] = index;
+    });
+    
+    // Add Y-axis index to each bar so multiple bars for same sensor appear on same row
+    const barsWithIndex = filteredBars.map(bar => {
+      // Try exact match first, then case-insensitive
+      let sensorIndex = sensorToIndexMap[bar.sensor];
+      if (sensorIndex === undefined) {
+        sensorIndex = sensorToIndexMap[bar.sensor.toLowerCase()];
+      }
+      if (sensorIndex === undefined) {
+        // Find by name match (case-insensitive)
+        const foundSensor = sensors.find(s => 
+          s.name.toLowerCase() === bar.sensor.toLowerCase() || s.name === bar.sensor
+        );
+        sensorIndex = foundSensor ? sensors.indexOf(foundSensor) : -1;
+      }
+      
+      return {
+        ...bar,
+        sensorIndex: sensorIndex !== undefined && sensorIndex !== null ? sensorIndex : -1,
+        sensorName: bar.sensor // Keep original name for tooltip
+      };
+    });
+    
+    // Debug: Log sensor index mapping
+    console.log(`📊 Sensor index mapping:`, sensors.map((s, idx) => `${s.name} -> ${idx}`).join(', '));
+    console.log(`📊 Bar indices:`, barsWithIndex.slice(0, 10).map(b => `${b.sensor} -> ${b.sensorIndex}`).join(', '));
+    
+    console.log(`📊 Timeline bar chart: ${barsWithIndex.length} bars created from ${timelinePoints.length} timeline points`);
+    if (barsWithIndex.length > 0) {
+      console.log(`   Sample bars:`, barsWithIndex.slice(0, 5).map(bar => {
         const startH = Math.floor(bar.start / 60) % 24;
         const startM = Math.floor(bar.start % 60);
         const endH = Math.floor(bar.end / 60) % 24;
@@ -1454,26 +1587,32 @@ const SwitchSensors = () => {
           sensor: bar.sensor,
           start: `${String(startH).padStart(2, '0')}:${String(startM).padStart(2, '0')}`,
           end: `${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}`,
+          sensorIndex: bar.sensorIndex,
           duration: (bar.end - bar.start).toFixed(1) + ' min'
         };
       }));
     }
-    return filteredBars;
-  }, [filteredTimelineData, timelineData, sensors, selectedShift]);
+    return barsWithIndex;
+  }, [filteredTimelineData, timelineData, sensors, selectedShift, payloadReceived, lastPayloadTime]);
 
   // Custom tooltip for timeline bar chart
-  const TimelineBarTooltip = ({ active, payload }) => {
+  const TimelineBarTooltip = ({ active, payload, label }) => {
     if (active && payload && payload.length) {
-      const data = payload[0].payload;
-      const duration = data.end - data.start;
+      // For ReferenceArea, payload structure is different - get data from ReferenceArea props
+      // Find the bar data for this sensor index (label is the sensorIndex)
+      const sensorIndex = typeof label === 'number' ? label : parseInt(label);
+      const bar = timelineBarData.find(b => b.sensorIndex === sensorIndex);
+      if (!bar) return null;
+      
+      const duration = bar.end - bar.start;
       const hours = Math.floor(duration / 60);
       const mins = Math.floor(duration % 60);
       
       // Convert start and end times (clock minutes) to HH:mm format
-      let startHours = Math.floor(data.start / 60);
-      let startMins = Math.floor(data.start % 60);
-      let endHours = Math.floor(data.end / 60);
-      let endMins = Math.floor(data.end % 60);
+      let startHours = Math.floor(bar.start / 60);
+      let startMins = Math.floor(bar.start % 60);
+      let endHours = Math.floor(bar.end / 60);
+      let endMins = Math.floor(bar.end % 60);
       
       // Handle overnight shifts: wrap hours >= 24 back to 0-23
       if (startHours >= 24) {
@@ -1485,7 +1624,7 @@ const SwitchSensors = () => {
       
       return (
         <div className="bg-white p-2 border border-gray-300 shadow-md rounded">
-          <p className="font-bold">{data.sensor}</p>
+          <p className="font-bold">{bar.sensorName || bar.sensor}</p>
           <p>{`Duration: ${hours > 0 ? `${hours}h ` : ''}${mins}m`}</p>
           <p>{`Time: ${String(startHours).padStart(2, '0')}:${String(startMins).padStart(2, '0')} - ${String(endHours).padStart(2, '0')}:${String(endMins).padStart(2, '0')}`}</p>
         </div>
@@ -1635,9 +1774,9 @@ const SwitchSensors = () => {
           timelineBarData.length > 0 || timelineData.length > 0 ? (
             <div className="w-full" style={{ minHeight: '400px' }}>
               <ResponsiveContainer width="100%" height={Math.max(400, sensors.length * 60 + 100)}>
-                <BarChart
+                <ComposedChart
                   layout="vertical"
-                  data={timelineBarData.length > 0 ? timelineBarData : []}
+                  data={sensors.map((s, index) => ({ sensorIndex: index, sensorName: s.name }))} // One entry per sensor for Y-axis with numeric index
                   margin={{ top: 5, right: 30, left: 100, bottom: 50 }}
                 >
                   <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={true} />
@@ -1673,152 +1812,35 @@ const SwitchSensors = () => {
                     }}
             />
             <YAxis 
-                    dataKey="sensor" 
-                    type="category" 
+                    dataKey="sensorIndex" 
+                    type="number"
                     width={90}
-                    tick={{ fontSize: 12 }}
-                    domain={sensors.length > 0 ? sensors.map(s => s.name) : ['']}
+                    tick={{ fontSize: 0 }} // Hide tick labels
+                    domain={[0, Math.max(0, sensors.length - 1)]}
+                    ticks={sensors.map((_, index) => index)} // Explicitly set ticks to sensor indices
+                    tickFormatter={() => ''} // Return empty string to hide labels
+                    label={{ value: 'Sensor Data', angle: -90, position: 'insideLeft' }}
                   />
                   <Tooltip content={<TimelineBarTooltip />} />
-                  {timelineBarData.length > 0 && (
-                    <Bar 
-                      dataKey="end"
-                      shape={(props) => {
-                        const { payload, x, y, width, height, xAxis } = props;
-                        
-                        // Calculate shift domain directly since xAxis might not be available
-                        let domainStart, domainEnd;
-                        if (selectedShift && xAxis && xAxis.domain && Array.isArray(xAxis.domain)) {
-                          [domainStart, domainEnd] = xAxis.domain;
-                        } else if (selectedShift) {
-                          // Fallback: calculate domain from shift times
-                          const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
-                          const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
-                          domainStart = startHour * 60 + startMin;
-                          domainEnd = endHour * 60 + endMin;
-                          const isOvernight = domainEnd <= domainStart;
-                          if (isOvernight) {
-                            domainEnd = domainEnd + (24 * 60);
-                          }
-                        } else {
-                          // Default fallback
-                          domainStart = 0;
-                          domainEnd = 1440;
-                        }
-                        
-                        const domainRange = domainEnd - domainStart;
-                        
-                        // Try to get chart bounds from xAxis if available
-                        let chartLeft, chartWidth;
-                        if (xAxis && typeof xAxis.x === 'number' && typeof xAxis.width === 'number') {
-                          // xAxis.x is the left edge of the axis, xAxis.width is the axis width
-                          chartLeft = xAxis.x;
-                          chartWidth = xAxis.width;
-                        } else {
-                          // Fallback: use the props passed to shape function
-                          // For vertical layout, 'x' might be relative to the chart container
-                          chartLeft = 0; // We'll calculate relative to x
-                          chartWidth = width;
-                        }
-                        
-                        // In Recharts BarChart with layout="vertical" and dataKey="end":
-                        // - x represents the position where the 'end' value is plotted on the X-axis
-                        // - width is the full width available for the chart area  
-                        // - The chart area spans from (x - width) to x
-                        
-                        // Calculate ratios: where do start and end fall within the domain?
-                        // Clamp ratios to [0, 1] to ensure bars stay within chart bounds
-                        const startRatio = domainRange > 0 
-                          ? Math.max(0, Math.min(1, (payload.start - domainStart) / domainRange)) 
-                          : 0;
-                        const endRatio = domainRange > 0 
-                          ? Math.max(0, Math.min(1, (payload.end - domainStart) / domainRange)) 
-                          : 0;
-                        
-                        // Use xAxis scale function if available for accurate positioning
-                        // Otherwise fall back to manual calculation
-                        let barStartPixel, barEndPixel;
-                        let chartLeftEdge, chartRightEdge;
-                        
-                        if (xAxis && xAxis.scale && typeof xAxis.scale === 'function') {
-                          // Use the scale function - this is the most accurate method
-                          barStartPixel = xAxis.scale(payload.start);
-                          barEndPixel = xAxis.scale(payload.end);
-                          chartLeftEdge = xAxis.scale(domainStart);
-                          chartRightEdge = xAxis.scale(domainEnd);
-                        } else {
-                          // Manual calculation - CRITICAL FIX
-                          // In Recharts BarChart with layout="vertical" and dataKey="end":
-                          // The 'x' prop is the LEFT edge of where Recharts wants to draw the bar
-                          // The bar width is determined by Recharts based on the 'end' value
-                          // But we want to override this completely with our custom positioning
-                          
-                          // The chart plotting area starts at some left edge and has width 'chartWidth'
-                          // We need to find where the chart area actually starts
-                          // Since 'x' is the left edge of the bar for 'end' value, and we know the end ratio:
-                          const endValueRatio = domainRange > 0 ? (payload.end - domainStart) / domainRange : 0;
-                          
-                          // If 'x' is the left edge of the bar for 'end', then:
-                          // x = chartLeft + (endRatio * chartWidth) - (some bar width)
-                          // But we don't know the bar width Recharts calculated...
-                          
-                          // Alternative approach: 'x' might be the RIGHT edge of where Recharts wants the bar
-                          // If so: x = chartLeft + (endRatio * chartWidth)
-                          // Therefore: chartLeft = x - (endRatio * chartWidth)
-                          
-                          // SIMPLIFIED: Try treating 'x' as the left edge of the chart area directly
-                          // This is the simplest interpretation - 'x' is where the chart starts
-                          chartLeftEdge = x;
-                          chartRightEdge = x + chartWidth;
-                          
-                          // Calculate bar positions using ratios directly
-                          barStartPixel = chartLeftEdge + (chartWidth * startRatio);
-                          barEndPixel = chartLeftEdge + (chartWidth * endRatio);
-                          
-                          // If bars still appear wrong, try alternatives:
-                          // Option 1: chartLeftEdge = x - width (if x is right edge)
-                          // Option 2: chartLeftEdge = x - (chartWidth * endValueRatio) (if x is where end maps)
-                          // Option 3: chartLeftEdge = x - (chartWidth * (1 - endValueRatio)) (inverted)
-                        }
-                        
-                        const calculatedBarWidth = barEndPixel - barStartPixel;
-                        
-                        // Debug: Log first few bars to verify positioning
-                        if (payload.sensor === 'CH05' || payload.sensor === 'CH02') {
-                          console.log(`🎯 Bar Position Debug for ${payload.sensor}:`, {
-                            times: `${Math.floor(payload.start/60)%24}:${String(Math.floor(payload.start%60)).padStart(2,'0')} - ${Math.floor(payload.end/60)%24}:${String(Math.floor(payload.end%60)).padStart(2,'0')}`,
-                            domain: `${Math.floor(domainStart/60)%24}:${String(Math.floor(domainStart%60)).padStart(2,'0')} - ${Math.floor(domainEnd/60)%24}:${String(Math.floor(domainEnd%60)).padStart(2,'0')}`,
-                            ratios: `startRatio: ${startRatio.toFixed(3)}, endRatio: ${endRatio.toFixed(3)}`,
-                            chartArea: `left: ${chartLeftEdge.toFixed(0)}, right: ${chartRightEdge.toFixed(0)}, width: ${Math.abs(chartRightEdge - chartLeftEdge).toFixed(0)}`,
-                            barPosition: `start: ${barStartPixel.toFixed(0)}, end: ${barEndPixel.toFixed(0)}, width: ${calculatedBarWidth.toFixed(0)}px`,
-                            usingScale: xAxis && xAxis.scale ? 'YES (xAxis.scale)' : 'NO (manual)',
-                            rawValues: {
-                              x: x.toFixed(0),
-                              width: width.toFixed(0),
-                              payloadStart: payload.start,
-                              payloadEnd: payload.end
-                            }
-                          });
-                        }
-                        
-                        return (
-                          <rect
-                            x={barStartPixel}
-                            y={y}
-                            width={Math.max(1, calculatedBarWidth)} // Minimum 1px for visibility
-                            height={height || 20}
-                            fill={payload.color}
-                            rx={4}
-                          />
-                        );
-                      }}
-                    >
-                      {timelineBarData.map((entry, index) => (
-                        <Cell key={`cell-${index}`} />
-                      ))}
-                    </Bar>
-                  )}
-                </BarChart>
+                  {/* Render ReferenceArea for each bar - grouped by sensor index */}
+                  {timelineBarData.map((bar, index) => {
+                    if (bar.sensorIndex === -1) return null; // Skip invalid bars
+                    return (
+                      <ReferenceArea
+                        key={`ref-area-${bar.sensor}-${index}-${bar.start}-${bar.end}`}
+                        y1={bar.sensorIndex}
+                        y2={bar.sensorIndex}
+                        x1={bar.start}
+                        x2={bar.end}
+                        fill={bar.color}
+                        fillOpacity={0.8}
+                        stroke={bar.color}
+                strokeWidth={2}
+                        isFront={false}
+                      />
+                    );
+                  })}
+                </ComposedChart>
         </ResponsiveContainer>
             </div>
           ) : (

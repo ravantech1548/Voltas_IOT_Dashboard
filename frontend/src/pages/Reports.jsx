@@ -173,7 +173,7 @@ const Reports = () => {
       sensors.forEach((sensor, sensorIndex) => {
         const sensorData = allResponses[sensorIndex].data || [];
         console.log(`📊 Fetched ${sensorData.length} records for ${sensor.name}`);
-        sensorData.forEach(item => {
+        sensorData.forEach((item, itemIndex) => {
           const time = new Date(item.timestamp);
           // Use timestamp as key to preserve all records (with milliseconds precision)
           const timeKey = time.getTime().toString(); // Use timestamp in milliseconds for unique key
@@ -182,7 +182,8 @@ const Reports = () => {
             dataMap.set(timeKey, {
               timestamp: time,
               date: time.toISOString().split('T')[0],
-              time: `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}:${String(time.getSeconds()).padStart(2, '0')}`
+              time: `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}:${String(time.getSeconds()).padStart(2, '0')}`,
+              liveStatus: null // Will be set from data_status field
             });
             // Initialize all sensors to null
             sensors.forEach(s => {
@@ -194,6 +195,23 @@ const Reports = () => {
           const value = parseFloat(item.value);
           // Store the value for this sensor (may overwrite if multiple sensors update at same timestamp)
           point[sensor.name] = value;
+          
+          // Store data_status (live/offline) - prioritize 'offline' if any sensor is offline
+          if (item.data_status) {
+            // Always update if we have data_status from API
+            if (point.liveStatus === null || point.liveStatus === 'live') {
+              point.liveStatus = item.data_status;
+            }
+            // If point.liveStatus is already 'offline', keep it as 'offline'
+          } else if (point.liveStatus === null) {
+            // Default to 'live' if data_status not available (backwards compatibility)
+            point.liveStatus = 'live';
+          }
+          
+          // Debug: Log data_status for first few records
+          if (itemIndex < 2 && item.data_status) {
+            console.log(`📊 Record ${itemIndex} data_status for ${sensor.name}:`, item.data_status, 'at', item.timestamp);
+          }
         });
       });
       
@@ -230,14 +248,17 @@ const Reports = () => {
     }
 
     // CSV headers
-    const headers = ['Serial Number', 'Date', 'Time', ...sensors.map(s => s.name)];
+    const headers = ['Serial Number', 'Date', 'Time', 'Live Status', ...sensors.map(s => s.name)];
     
     // CSV rows
     const rows = reportData.map((row, index) => {
+      const status = row.liveStatus || 'live'; // Default to 'live' if not set
+      const liveStatus = status === 'live' ? 'Live' : status === 'offline' ? 'Offline' : 'Unknown';
       const values = [
         index + 1, // Serial number
         row.date,
         row.time,
+        liveStatus, // Live Status
         ...sensors.map(s => {
           const value = row[s.name];
           if (value === null || value === undefined) return '';
@@ -270,13 +291,16 @@ const Reports = () => {
     }
 
     // Prepare worksheet data
-    const headers = ['Serial Number', 'Date', 'Time', ...sensors.map(s => s.name)];
+    const headers = ['Serial Number', 'Date', 'Time', 'Live Status', ...sensors.map(s => s.name)];
     
     const rows = reportData.map((row, index) => {
+      const status = row.liveStatus || 'live'; // Default to 'live' if not set
+      const liveStatus = status === 'live' ? 'Live' : status === 'offline' ? 'Offline' : 'Unknown';
       return [
         index + 1, // Serial number
         row.date,
         row.time,
+        liveStatus, // Live Status
         ...sensors.map(s => {
           const value = row[s.name];
           if (value === null || value === undefined) return '';
@@ -293,6 +317,7 @@ const Reports = () => {
       { wch: 12 }, // Serial Number
       { wch: 12 }, // Date
       { wch: 10 }, // Time
+      { wch: 12 }, // Live Status
       ...sensors.map(() => ({ wch: 10 })) // Sensor columns
     ];
     worksheet['!cols'] = columnWidths;
@@ -463,6 +488,9 @@ const Reports = () => {
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider sticky left-40 bg-gray-50 z-10">
                     Time
                   </th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Live Status
+                  </th>
                   {sensors.map(sensor => (
                     <th key={sensor.id} className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
                       {sensor.name}
@@ -481,6 +509,30 @@ const Reports = () => {
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900 sticky left-40 bg-white z-10">
                       {row.time}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap text-sm text-center">
+                      {(() => {
+                        const status = row.liveStatus || 'live'; // Default to 'live' if not set
+                        if (status === 'live') {
+                          return (
+                            <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                              Live
+                            </span>
+                          );
+                        } else if (status === 'offline') {
+                          return (
+                            <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                              Offline
+                            </span>
+                          );
+                        } else {
+                          return (
+                            <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+                              Unknown
+                            </span>
+                          );
+                        }
+                      })()}
                     </td>
                     {sensors.map(sensor => {
                       const value = row[sensor.name];

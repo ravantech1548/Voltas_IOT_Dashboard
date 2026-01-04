@@ -83,10 +83,10 @@ const getLatestSensorData = async (req, res, next) => {
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    // Get latest data for each sensor
+    // Get latest data for each sensor (include data_status)
     const result = await pool.query(
       `SELECT DISTINCT ON (sensor_id) 
-       sensor_id, value, timestamp, quality, metadata
+       sensor_id, value, timestamp, quality, metadata, data_status
        FROM sensor_data
        WHERE sensor_id = ANY($1)
        ORDER BY sensor_id, timestamp DESC`,
@@ -95,7 +95,7 @@ const getLatestSensorData = async (req, res, next) => {
 
     console.log(`📊 Latest sensor data query: Found ${result.rows.length} records for ${sensorIdArray.length} sensors`);
     result.rows.forEach(row => {
-      console.log(`   Sensor ID ${row.sensor_id}: value=${row.value} (${typeof row.value}), timestamp=${row.timestamp}`);
+      console.log(`   Sensor ID ${row.sensor_id}: value=${row.value} (${typeof row.value}), timestamp=${row.timestamp}, data_status=${row.data_status || 'null'}`);
     });
 
     res.json(result.rows);

@@ -18,6 +18,7 @@ const sensorRoutes = require('./routes/sensors');
 const dataRoutes = require('./routes/data');
 const shiftRoutes = require('./routes/shifts');
 const userRoutes = require('./routes/users');
+const settingsRoutes = require('./routes/settings');
 
 const app = express();
 const server = http.createServer(app);
@@ -48,6 +49,7 @@ app.use('/api/sensors', sensorRoutes);
 app.use('/api/data', dataRoutes);
 app.use('/api/shifts', shiftRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/settings', settingsRoutes);
 
 // Error handler (must be last)
 app.use(errorHandler);
