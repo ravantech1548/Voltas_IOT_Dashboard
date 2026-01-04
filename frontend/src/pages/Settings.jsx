@@ -15,6 +15,7 @@ const Settings = () => {
   const [sensorTypes, setSensorTypes] = useState([]);
   const [users, setUsers] = useState([]);
   const [shifts, setShifts] = useState([]);
+  const [systemSettings, setSystemSettings] = useState({});
 
   // Form states
   const [formData, setFormData] = useState({});
@@ -28,13 +29,40 @@ const Settings = () => {
     { id: 'sensors', name: 'Sensors' },
     { id: 'sensor-types', name: 'Sensor Types' },
     { id: 'shifts', name: 'Shifts' },
-    { id: 'users', name: 'Users' }
+    { id: 'users', name: 'Users' },
+    { id: 'system-settings', name: 'System Settings' }
   ];
 
   // Fetch data based on active tab
   useEffect(() => {
     fetchData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
+
+  // Auto-open form for system-settings when tab is selected or when settings are loaded
+  useEffect(() => {
+    if (activeTab === 'system-settings' && !showForm) {
+      setEditingId('system-settings');
+      // Get initial form data - use systemSettings if available, otherwise defaults
+      const initialData = {
+        payload_timeout_minutes: systemSettings.payload_timeout_minutes?.value || '5',
+        offline_check_interval_minutes: systemSettings.offline_check_interval_minutes?.value || '1',
+        heartbeat_interval_minutes: systemSettings.heartbeat_interval_minutes?.value || '1'
+      };
+      setFormData(initialData);
+      setShowForm(true);
+    }
+    
+    // Also update form data when systemSettings change (after initial load)
+    if (activeTab === 'system-settings' && showForm && Object.keys(systemSettings).length > 0) {
+      const updatedData = {
+        payload_timeout_minutes: systemSettings.payload_timeout_minutes?.value || '5',
+        offline_check_interval_minutes: systemSettings.offline_check_interval_minutes?.value || '1',
+        heartbeat_interval_minutes: systemSettings.heartbeat_interval_minutes?.value || '1'
+      };
+      setFormData(updatedData);
+    }
+  }, [activeTab, systemSettings, showForm]);
 
   const fetchData = async () => {
     setLoading(true);
@@ -85,6 +113,13 @@ const Settings = () => {
           const shiftsForUsers = await api.get('/shifts');
           setShifts(shiftsForUsers.data);
           break;
+        case 'system-settings':
+          const settingsRes = await api.get('/settings');
+          setSystemSettings(settingsRes.data);
+          break;
+        default:
+          // No data to fetch for this tab
+          break;
       }
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to fetch data');
@@ -95,6 +130,10 @@ const Settings = () => {
 
   const handleCreate = () => {
     setEditingId(null);
+    // For system settings, always show edit form (no create needed)
+    if (activeTab === 'system-settings') {
+      setEditingId('system-settings'); // Use a special ID to trigger update mode
+    }
     setFormData(getInitialFormData());
     setShowForm(true);
     setError('');
@@ -145,6 +184,9 @@ const Settings = () => {
         case 'users':
           await api.delete(`/users/${id}`);
           break;
+        default:
+          // No delete action for this tab
+          break;
       }
       setSuccess('Item deleted successfully');
       fetchData();
@@ -176,7 +218,8 @@ const Settings = () => {
         if (submitData.shift_id === '' || submitData.role !== 'operator') submitData.shift_id = null;
       }
 
-      if (editingId) {
+      // System settings always use update (no create)
+      if (activeTab === 'system-settings' || editingId) {
         // Update
         switch (activeTab) {
           case 'clients':
@@ -200,8 +243,22 @@ const Settings = () => {
           case 'users':
             await api.put(`/users/${editingId}`, submitData);
             break;
+          case 'system-settings':
+            // System settings are updated via bulk update endpoint
+            await api.put('/settings', { settings: submitData });
+            // Reload settings to get the updated values
+            const updatedSettingsRes = await api.get('/settings');
+            setSystemSettings(updatedSettingsRes.data);
+            // Update formData with the newly saved values
+            const updatedFormData = {
+              payload_timeout_minutes: updatedSettingsRes.data.payload_timeout_minutes?.value || '5',
+              offline_check_interval_minutes: updatedSettingsRes.data.offline_check_interval_minutes?.value || '1',
+              heartbeat_interval_minutes: updatedSettingsRes.data.heartbeat_interval_minutes?.value || '1'
+            };
+            setFormData(updatedFormData);
+            break;
         }
-        setSuccess('Item updated successfully');
+        setSuccess(activeTab === 'system-settings' ? 'Settings updated successfully' : 'Item updated successfully');
       } else {
         // Create
         switch (activeTab) {
@@ -226,10 +283,20 @@ const Settings = () => {
           case 'users':
             await api.post('/users', submitData);
             break;
+          default:
+            // No create action for this tab
+            break;
         }
         setSuccess('Item created successfully');
       }
-      setShowForm(false);
+      // For system settings, keep form open and show updated values
+      if (activeTab === 'system-settings') {
+        setSuccess('Settings updated successfully');
+        // Keep form open for system settings - don't close it
+        // Form data is already updated above with new values
+      } else {
+        setShowForm(false);
+      }
       fetchData();
       setTimeout(() => setSuccess(''), 3000);
     } catch (err) {
@@ -255,18 +322,31 @@ const Settings = () => {
         return { name: '', start_time: '', end_time: '', description: '', is_active: true };
       case 'users':
         return { username: '', email: '', password: '', role: 'viewer', client_id: '', shift_id: '' };
+      case 'system-settings':
+        return {
+          payload_timeout_minutes: systemSettings.payload_timeout_minutes?.value || '5',
+          offline_check_interval_minutes: systemSettings.offline_check_interval_minutes?.value || '1',
+          heartbeat_interval_minutes: systemSettings.heartbeat_interval_minutes?.value || '1'
+        };
       default:
         return {};
     }
   };
 
   const renderForm = () => {
-    if (!showForm) return null;
+    // For system-settings, always show the form when tab is selected (auto-opens via useEffect)
+    if (activeTab === 'system-settings' && !showForm) {
+      return null; // Will be opened by useEffect
+    }
+    
+    if (!showForm) {
+      return null;
+    }
 
     return (
       <div className="bg-white rounded-lg shadow p-6 mb-6">
         <h3 className="text-lg font-semibold mb-4">
-          {editingId ? 'Edit' : 'Create'} {tabs.find(t => t.id === activeTab)?.name.slice(0, -1)}
+          {activeTab === 'system-settings' ? 'System Settings' : (editingId ? 'Edit' : 'Create') + ' ' + tabs.find(t => t.id === activeTab)?.name.slice(0, -1)}
         </h3>
         <form onSubmit={handleSubmit} className="space-y-4">
           {activeTab === 'clients' && (
@@ -615,6 +695,79 @@ const Settings = () => {
             </>
           )}
 
+          {activeTab === 'system-settings' && (
+            <>
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+                <p className="text-sm text-blue-800">
+                  <strong>Note:</strong> These settings control how the system detects online/offline status for MQTT devices.
+                  Changes take effect immediately after saving.
+                </p>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Payload Timeout (minutes) *
+                  <span className="text-xs text-gray-500 ml-2">Default: 5 minutes</span>
+                </label>
+                <input
+                  type="number"
+                  required
+                  min="0.5"
+                  max="60"
+                  step="0.5"
+                  value={formData.payload_timeout_minutes !== undefined ? formData.payload_timeout_minutes : (systemSettings.payload_timeout_minutes?.value || '5')}
+                  onChange={(e) => setFormData({ ...formData, payload_timeout_minutes: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  Time in minutes without payload before device is marked as offline. 
+                  Should be greater than your payload sending interval. (e.g., if payloads send every 2 minutes, set to 3-5 minutes)
+                </p>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Offline Check Interval (minutes) *
+                  <span className="text-xs text-gray-500 ml-2">Default: 1 minute</span>
+                </label>
+                <input
+                  type="number"
+                  required
+                  min="0.5"
+                  max="60"
+                  step="0.5"
+                  value={formData.offline_check_interval_minutes !== undefined ? formData.offline_check_interval_minutes : (systemSettings.offline_check_interval_minutes?.value || '1')}
+                  onChange={(e) => setFormData({ ...formData, offline_check_interval_minutes: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  How often the system checks for offline devices (in minutes). Lower values provide faster offline detection but use more resources.
+                </p>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Heartbeat Interval (minutes) *
+                  <span className="text-xs text-gray-500 ml-2">Default: 1 minute</span>
+                </label>
+                <input
+                  type="number"
+                  required
+                  min="0.5"
+                  max="60"
+                  step="0.5"
+                  value={formData.heartbeat_interval_minutes !== undefined ? formData.heartbeat_interval_minutes : (systemSettings.heartbeat_interval_minutes?.value || '1')}
+                  onChange={(e) => setFormData({ ...formData, heartbeat_interval_minutes: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  How often to insert heartbeat records when sensor values haven't changed (in minutes). 
+                  This ensures the system remains marked as "Live" even when sensor status is unchanged.
+                </p>
+              </div>
+            </>
+          )}
+
           {activeTab === 'users' && (
             <>
               <div>
@@ -730,6 +883,11 @@ const Settings = () => {
   };
 
   const renderTable = () => {
+    // System settings doesn't show a table - it shows a form directly
+    if (activeTab === 'system-settings') {
+      return null; // Don't render table for system settings
+    }
+    
     let data = activeTab === 'clients' ? clients :
                 activeTab === 'departments' ? departments :
                 activeTab === 'locations' ? locations :

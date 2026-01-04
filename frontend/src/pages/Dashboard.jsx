@@ -22,6 +22,8 @@ const Dashboard = () => {
   const [payloadReceived, setPayloadReceived] = useState(false); // Track if actual payload has been received
   const [lastPayloadTime, setLastPayloadTime] = useState(null);
   const [switchSensorData, setSwitchSensorData] = useState([]); // Data for all switch sensors during shift for Total Switches calculation
+  const [showOfflineNotification, setShowOfflineNotification] = useState(false); // Show notification when dashboard clicked and offline
+  const [payloadTimeoutMinutes, setPayloadTimeoutMinutes] = useState(5); // Configurable timeout from settings (default 5 minutes)
   const socketRef = useRef(null);
   const switchSensorsRef = useRef([]);
   const fetchingSwitchDataRef = useRef(false); // Track if we're already fetching to prevent duplicate requests
@@ -31,7 +33,25 @@ const Dashboard = () => {
   useEffect(() => {
     fetchSensors();
     fetchShifts();
+    fetchSystemSettings();
   }, []);
+
+  // Fetch system settings (timeout configuration)
+  const fetchSystemSettings = async () => {
+    try {
+      const response = await api.get('/settings');
+      const settings = response.data;
+      if (settings.payload_timeout_minutes?.value) {
+        const timeoutValue = parseFloat(settings.payload_timeout_minutes.value);
+        if (!isNaN(timeoutValue) && timeoutValue > 0) {
+          setPayloadTimeoutMinutes(timeoutValue);
+          console.log(`✓ Dashboard: Loaded payload timeout: ${timeoutValue} minutes`);
+        }
+      }
+    } catch (error) {
+      console.warn('⚠️ Could not load system settings, using default timeout:', error.message);
+    }
+  };
 
   // Set initial shift based on user role
   useEffect(() => {
@@ -316,7 +336,8 @@ const Dashboard = () => {
           nameLower: s.name.toLowerCase(), // Keep lowercase for matching
           location: s.location_name || 'Unknown',
           type: s.sensor_type || 'Switch',
-          isActive: false
+          isActive: false,
+          value: 0 // Initialize with OFF state (value=0)
         }));
       
       setSwitchSensors(switchSens);
@@ -354,35 +375,70 @@ const Dashboard = () => {
       console.log(`📡 Fetching latest data for sensors: ${sensorIds}`);
       const response = await api.get(`/data/latest?sensor_ids=${sensorIds}`);
       
-      // Check if any recent data exists (within last 5 minutes) to determine if system is "Live"
-      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-      let hasRecentData = false;
+      // Check if any recent data exists (within configured timeout) to determine if system is "Live"
+      const timeoutMs = payloadTimeoutMinutes * 60 * 1000;
+      const timeoutAgo = new Date(Date.now() - timeoutMs);
+      let hasRecentLiveData = false;
+      let latestLiveDataTime = null;
+      let hasRecentOfflineData = false;
+      let latestOfflineDataTime = null;
       let latestDataTime = null;
       
       if (response.data && response.data.length > 0) {
+        console.log(`📊 Processing ${response.data.length} latest data records`);
         response.data.forEach(d => {
           if (d.timestamp) {
             const dataTime = new Date(d.timestamp);
-            if (dataTime >= fiveMinutesAgo) {
-              hasRecentData = true;
+            const isRecent = dataTime >= timeoutAgo;
+            const status = d.data_status || 'unknown';
+            
+            console.log(`   Sensor ${d.sensor_id}: timestamp=${dataTime.toISOString()}, data_status=${status}, isRecent=${isRecent}, timeout=${payloadTimeoutMinutes}min`);
+            
+            if (isRecent) {
+              // Track the latest data time regardless of status
               if (!latestDataTime || dataTime > latestDataTime) {
                 latestDataTime = dataTime;
               }
+              
+              // Check data_status to determine if it's live or offline
+              if (d.data_status === 'live') {
+                hasRecentLiveData = true;
+                if (!latestLiveDataTime || dataTime > latestLiveDataTime) {
+                  latestLiveDataTime = dataTime;
+                }
+                console.log(`   ✓ Found RECENT LIVE data for sensor ${d.sensor_id}`);
+              } else if (d.data_status === 'offline') {
+                hasRecentOfflineData = true;
+                if (!latestOfflineDataTime || dataTime > latestOfflineDataTime) {
+                  latestOfflineDataTime = dataTime;
+                }
+                console.log(`   ⚠ Found RECENT OFFLINE data for sensor ${d.sensor_id}`);
+              } else {
+                console.log(`   ? Found data with unknown status: ${status} for sensor ${d.sensor_id}`);
+              }
+            } else {
+              console.log(`   ⏰ Data is OLD (${Math.round((Date.now() - dataTime.getTime()) / 1000 / 60)} minutes ago) for sensor ${d.sensor_id}`);
             }
           }
         });
+      } else {
+        console.log('⚠️ No latest data received from API');
       }
       
-      // Only set payloadReceived if we have recent data (within 5 minutes)
-      if (hasRecentData && latestDataTime) {
+      console.log(`📊 Summary: hasRecentLiveData=${hasRecentLiveData}, hasRecentOfflineData=${hasRecentOfflineData}, latestLiveDataTime=${latestLiveDataTime ? latestLiveDataTime.toISOString() : 'null'}`);
+      
+      // Set payloadReceived based on data_status: true only if we have recent LIVE data
+      // If we only have offline data or no recent data, set to false
+      if (hasRecentLiveData && latestLiveDataTime) {
         setPayloadReceived(true);
-        setLastPayloadTime(latestDataTime);
+        setLastPayloadTime(latestLiveDataTime);
         
         // Only set active sensor states if we have recent live data
         const activeSensorData = response.data.find(d => {
           if (!d.timestamp) return false;
           const dataTime = new Date(d.timestamp);
-          if (dataTime < fiveMinutesAgo) return false; // Ignore old data
+          if (dataTime < timeoutAgo) return false; // Ignore old data
+          if (d.data_status !== 'live') return false; // Only consider live data
           
           const value = parseFloat(d.value);
           return value === 1 || value === "1" || d.value === 1 || d.value === "1";
@@ -400,27 +456,37 @@ const Dashboard = () => {
             );
           }
         } else {
-          // No active sensor in recent data
+          // No active sensor in recent data - set all to OFF (value=0)
           setActiveSensorId(null);
           setSwitchSensors(prevSensors => 
             prevSensors.map(s => ({
               ...s,
-              isActive: false
+              isActive: false,
+              value: 0 // Ensure value is 0 (OFF state)
             }))
           );
         }
       } else {
-        // No recent data - set to Offline and reset all sensors to inactive
+        // No recent live data - set to Offline and reset all sensors to inactive
         setPayloadReceived(false);
-        setLastPayloadTime(null);
+        
+        // If we have recent offline data, show its timestamp; otherwise null
+        if (hasRecentOfflineData && latestOfflineDataTime) {
+          setLastPayloadTime(latestOfflineDataTime);
+          console.log('⚠️ Recent offline data detected - Dashboard set to Offline, all sensors reset to OFF (value=0)');
+        } else {
+          setLastPayloadTime(null);
+          console.log('⚠️ No recent payload data - Dashboard set to Offline, all sensors reset to OFF (value=0)');
+        }
+        
         setActiveSensorId(null);
         setSwitchSensors(prevSensors => 
           prevSensors.map(s => ({
             ...s,
-            isActive: false
+            isActive: false,
+            value: 0 // Ensure value is 0 (OFF state)
           }))
         );
-        console.log('⚠️ No recent payload data - Dashboard set to Offline');
       }
     } catch (error) {
       console.error('Error fetching latest sensor data:', error);
@@ -588,10 +654,21 @@ const Dashboard = () => {
 
     socketInstance.on('sensor_update', (data) => {
       console.log('🔴 Dashboard: LIVE UPDATE RECEIVED:', data);
-      // Mark that actual payload has been received
-      setPayloadReceived(true);
-      const now = new Date();
-      setLastPayloadTime(now);
+      // Check data_status from WebSocket message - only mark as Live if data_status is 'live'
+      const isLiveData = data.data_status === 'live' || !data.data_status; // Default to 'live' if not specified (backward compatibility)
+      
+      if (isLiveData) {
+        // Mark that actual payload has been received (only for live data)
+        setPayloadReceived(true);
+        const now = new Date();
+        setLastPayloadTime(now);
+      } else {
+        // If data_status is 'offline', mark as offline
+        console.log('⚠️ Dashboard: Received offline status from WebSocket');
+        setPayloadReceived(false);
+        const now = new Date();
+        setLastPayloadTime(now);
+      }
       
       // Update switch sensor status
       if (data.sensor_id && data.sensor_name) {
@@ -612,7 +689,7 @@ const Dashboard = () => {
               return { ...sensor, isActive: isActive };
             } else if (isActive && sensor.isActive) {
               // If a sensor is turning ON, all others must be OFF (mutually exclusive)
-              return { ...sensor, isActive: false };
+              return { ...sensor, isActive: false, value: 0 }; // Set value to 0 (OFF state)
             }
             return sensor;
           });
@@ -691,7 +768,7 @@ const Dashboard = () => {
 
   // Periodic check for offline state - if no payload received within timeout, mark as offline
   useEffect(() => {
-    const OFFLINE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes timeout
+    const OFFLINE_TIMEOUT_MS = payloadTimeoutMinutes * 60 * 1000; // Use configurable timeout
     
     const checkOfflineStatus = () => {
       if (payloadReceived && lastPayloadTime) {
@@ -704,16 +781,17 @@ const Dashboard = () => {
           // Mark as offline
           setPayloadReceived(false);
           
-          // Reset all sensors to inactive
+          // Reset all sensors to inactive (OFF state - value 0)
           setActiveSensorId(null);
           setSwitchSensors(prevSensors => 
             prevSensors.map(s => ({
               ...s,
-              isActive: false
+              isActive: false,
+              value: 0 // Ensure value is 0 (OFF state)
             }))
           );
           
-          console.log('✅ Dashboard: All sensors reset to OFF - system marked as Offline');
+          console.log('✅ Dashboard: All sensors reset to OFF (value=0) - system marked as Offline');
         }
       } else if (payloadReceived && !lastPayloadTime) {
         // If payloadReceived is true but no lastPayloadTime, reset it
@@ -731,7 +809,7 @@ const Dashboard = () => {
     return () => {
       clearInterval(interval);
     };
-  }, [payloadReceived, lastPayloadTime]);
+  }, [payloadReceived, lastPayloadTime, payloadTimeoutMinutes]);
 
   // Update ref when switch sensors change - use length to avoid re-running on object reference changes
   useEffect(() => {
@@ -844,8 +922,43 @@ const Dashboard = () => {
     );
   }
 
+  // Handle dashboard click to show notification if offline
+  const handleDashboardClick = () => {
+    if (!payloadReceived) {
+      setShowOfflineNotification(true);
+      // Auto-hide notification after 5 seconds
+      setTimeout(() => {
+        setShowOfflineNotification(false);
+      }, 5000);
+    }
+  };
+
   return (
-    <div className="container mx-auto px-4 py-8">
+    <div className="container mx-auto px-4 py-8" onClick={handleDashboardClick}>
+      {/* Offline Notification */}
+      {showOfflineNotification && (
+        <div className="fixed top-4 right-4 bg-red-500 text-white px-6 py-4 rounded-lg shadow-lg z-50 flex items-center gap-3 animate-fade-in">
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+          <div>
+            <p className="font-semibold">No Payload Received</p>
+            <p className="text-sm mt-1">The system is offline. No sensor data is being received from the MQTT broker.</p>
+          </div>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowOfflineNotification(false);
+            }}
+            className="ml-4 text-white hover:text-gray-200"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
+      
       <div className="mb-6">
         <div className="flex items-center justify-between">
           <h1 className="text-3xl font-bold">Dashboard</h1>
