@@ -24,6 +24,9 @@ const Dashboard = () => {
   const [switchSensorData, setSwitchSensorData] = useState([]); // Data for all switch sensors during shift for Total Switches calculation
   const socketRef = useRef(null);
   const switchSensorsRef = useRef([]);
+  const fetchingSwitchDataRef = useRef(false); // Track if we're already fetching to prevent duplicate requests
+  const lastFetchParamsRef = useRef({ fetchKey: null, shiftId: null, date: null }); // Cache last fetch parameters
+  const previousFetchKeyRef = useRef(null); // Track previous fetch key to prevent unnecessary re-runs
 
   useEffect(() => {
     fetchSensors();
@@ -64,12 +67,71 @@ const Dashboard = () => {
     }
   }, [sensorData, selectedShift]);
 
+  // Track last fetch time to prevent rapid successive calls
+  const lastFetchTimeRef = useRef(0);
+  
   // Fetch data for all switch sensors during the current shift for "Total Switches" calculation
+  // Use a stable key to prevent unnecessary re-renders
+  const switchSensorFetchKey = useMemo(() => {
+    if (!selectedShift || switchSensors.length === 0) return null;
+    const currentDate = new Date().toDateString();
+    // Create a stable key from shift ID, date, and sensor count
+    const key = `${selectedShift.id}_${currentDate}_${switchSensors.length}`;
+    return key;
+  }, [selectedShift?.id, switchSensors.length]);
+
   useEffect(() => {
-    if (switchSensors.length === 0 || !selectedShift) return;
+    // Early exit if no valid key
+    if (!switchSensorFetchKey) {
+      if (switchSensorData.length > 0) {
+        setSwitchSensorData([]);
+      }
+      previousFetchKeyRef.current = null;
+      return;
+    }
+
+    // Check if key actually changed - if same as previous, skip entirely
+    if (previousFetchKeyRef.current === switchSensorFetchKey) {
+      // Key hasn't changed - don't re-fetch
+      return;
+    }
+
+    // Check if we already have data for this exact key in cache
+    const lastParams = lastFetchParamsRef.current;
+    if (lastParams.fetchKey === switchSensorFetchKey) {
+      if (fetchingSwitchDataRef.current) {
+        console.log('📊 ⏳ Already fetching data for this key, waiting...');
+        return;
+      }
+      // Cache hit - we already have this data loaded
+      console.log('📊 ✅ Cache HIT - skipping duplicate fetch');
+      console.log('   Key:', switchSensorFetchKey);
+      console.log('   Data points:', switchSensorData.length);
+      previousFetchKeyRef.current = switchSensorFetchKey;
+      return;
+    }
+
+    // Prevent duplicate simultaneous requests
+    if (fetchingSwitchDataRef.current) {
+      console.log('📊 ⚠️ Fetch already in progress. Will skip this request.');
+      console.log('   New key:', switchSensorFetchKey);
+      console.log('   Current fetch key:', lastParams.fetchKey);
+      return;
+    }
+    
+    // Cache miss - need to fetch new data
+    console.log('📊 🔄 Cache MISS - will fetch new data');
+    console.log('   New key:', switchSensorFetchKey);
+    console.log('   Previous key:', previousFetchKeyRef.current || lastParams.fetchKey || '(none)');
+    
+    // Update previous key immediately to prevent duplicate calls
+    previousFetchKeyRef.current = switchSensorFetchKey;
 
     const fetchSwitchSensorData = async () => {
+      fetchingSwitchDataRef.current = true;
       try {
+        console.log(`📊 Fetching switch sensor data for key: ${switchSensorFetchKey}`);
+        
         // Get shift time range for today
         const today = new Date();
         today.setHours(0, 0, 0, 0);
@@ -137,15 +199,39 @@ const Dashboard = () => {
 
         // Filter by shift hours
         const filtered = filterDataByShift(timelineArray, selectedShift);
+        
+        // IMPORTANT: Update cache IMMEDIATELY and synchronously to prevent re-trigger
+        // This must happen before any state updates
+        lastFetchParamsRef.current = {
+          fetchKey: switchSensorFetchKey,
+          shiftId: selectedShift.id,
+          date: new Date().toDateString(),
+          timestamp: Date.now()
+        };
+        
+        // Update fetch time
+        lastFetchTimeRef.current = Date.now();
+        
+        // Update previous key ref
+        previousFetchKeyRef.current = switchSensorFetchKey;
+        
+        // Now set the state (this won't trigger a re-fetch because cache is already set)
         setSwitchSensorData(filtered);
+        
+        console.log(`✅ Fetched ${filtered.length} switch sensor data points for shift ${selectedShift.name}`);
+        console.log(`   Cached fetchKey: ${switchSensorFetchKey}`);
+        console.log(`   Cache updated at: ${new Date(lastFetchParamsRef.current.timestamp).toLocaleTimeString()}`);
       } catch (error) {
         console.error('Error fetching switch sensor data for shift:', error);
         setSwitchSensorData([]);
+      } finally {
+        fetchingSwitchDataRef.current = false;
       }
     };
 
     fetchSwitchSensorData();
-  }, [switchSensors, selectedShift]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [switchSensorFetchKey]); // Only depend on the stable key - selectedShift is already included in the key
 
   const fetchShifts = async () => {
     try {
@@ -252,11 +338,20 @@ const Dashboard = () => {
   };
 
   // Fetch latest sensor data to determine current active sensor and check if payloads are being received
+  const fetchLatestSensorDataRef = useRef(false); // Prevent duplicate calls
   const fetchLatestSensorData = async (sensorList) => {
     if (sensorList.length === 0) return;
     
+    // Prevent duplicate simultaneous calls
+    if (fetchLatestSensorDataRef.current) {
+      console.log('📡 Already fetching latest sensor data, skipping duplicate request');
+      return;
+    }
+    
+    fetchLatestSensorDataRef.current = true;
     try {
       const sensorIds = sensorList.map(s => s.id).join(',');
+      console.log(`📡 Fetching latest data for sensors: ${sensorIds}`);
       const response = await api.get(`/data/latest?sensor_ids=${sensorIds}`);
       
       // Check if any recent data exists (within last 5 minutes) to determine if system is "Live"
@@ -332,6 +427,8 @@ const Dashboard = () => {
       // On error, set to Offline
       setPayloadReceived(false);
       setLastPayloadTime(null);
+    } finally {
+      fetchLatestSensorDataRef.current = false;
     }
   };
 
@@ -419,12 +516,48 @@ const Dashboard = () => {
     }
   }, [lastMessage, selectedSensor]);
 
+  // Track sensor IDs to detect actual changes (not just array reference changes)
+  const switchSensorIdsRef = useRef('');
+  const isConnectingRef = useRef(false);
+  
   // WebSocket connection for live switch sensor updates
   useEffect(() => {
     const token = localStorage.getItem('token');
     const wsUrl = process.env.REACT_APP_WS_URL || 'http://localhost:5000';
     
-    if (!token || switchSensorsRef.current.length === 0) return;
+    // Create stable sensor IDs string for comparison
+    const currentSensorIds = switchSensors.map(s => s.id).sort().join(',');
+    
+    // If sensor IDs haven't changed and socket is already connected, skip
+    if (switchSensorIdsRef.current === currentSensorIds && socketRef.current?.connected) {
+      return;
+    }
+    
+    // Prevent duplicate connections
+    if (isConnectingRef.current || (socketRef.current && socketRef.current.connected)) {
+      console.log('🔌 WebSocket already connected or connecting, skipping...');
+      return;
+    }
+    
+    if (!token || switchSensors.length === 0) {
+      // Clean up if no sensors
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
+      return;
+    }
+
+    // Clean up existing connection if sensor IDs changed
+    if (socketRef.current && switchSensorIdsRef.current !== currentSensorIds) {
+      console.log('🔌 Sensor IDs changed, cleaning up old connection...');
+      socketRef.current.removeAllListeners();
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+
+    isConnectingRef.current = true;
+    switchSensorIdsRef.current = currentSensorIds;
 
     const socketInstance = io(wsUrl, {
       auth: { token },
@@ -446,6 +579,7 @@ const Dashboard = () => {
     socketInstance.on('connect', () => {
       console.log('✅ Dashboard WebSocket connected');
       setWsConnected(true);
+      isConnectingRef.current = false;
       // Join all switch sensor rooms
       switchSensorsRef.current.forEach(sensor => {
         socketInstance.emit('join_room', `sensor_${sensor.id}`);
@@ -453,9 +587,11 @@ const Dashboard = () => {
     });
 
     socketInstance.on('sensor_update', (data) => {
+      console.log('🔴 Dashboard: LIVE UPDATE RECEIVED:', data);
       // Mark that actual payload has been received
       setPayloadReceived(true);
-      setLastPayloadTime(new Date());
+      const now = new Date();
+      setLastPayloadTime(now);
       
       // Update switch sensor status
       if (data.sensor_id && data.sensor_name) {
@@ -507,6 +643,7 @@ const Dashboard = () => {
     socketInstance.on('connect_error', (error) => {
       console.error('❌ Dashboard WebSocket connection error:', error);
       setWsConnected(false);
+      isConnectingRef.current = false;
     });
 
     socketInstance.on('reconnect', (attemptNumber) => {
@@ -533,19 +670,73 @@ const Dashboard = () => {
     });
 
     return () => {
+      isConnectingRef.current = false;
       if (socketInstance) {
-        switchSensorsRef.current.forEach(sensor => {
-          socketInstance.emit('leave_room', `sensor_${sensor.id}`);
-        });
-        socketInstance.disconnect();
+        // Only cleanup if this is a real unmount, not just a dependency change
+        if (socketRef.current === socketInstance) {
+          switchSensorsRef.current.forEach(sensor => {
+            try {
+              socketInstance.emit('leave_room', `sensor_${sensor.id}`);
+            } catch (e) {
+              console.warn('⚠️ Error leaving room:', e);
+            }
+          });
+          socketInstance.removeAllListeners();
+          socketInstance.disconnect();
+          socketRef.current = null;
+        }
       }
     };
-  }, [switchSensors.length]);
+  }, [switchSensors.map(s => s.id).join(',')]); // Only depend on sensor IDs, not array reference
 
-  // Update ref when switch sensors change
+  // Periodic check for offline state - if no payload received within timeout, mark as offline
+  useEffect(() => {
+    const OFFLINE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes timeout
+    
+    const checkOfflineStatus = () => {
+      if (payloadReceived && lastPayloadTime) {
+        const timeSinceLastPayload = Date.now() - lastPayloadTime.getTime();
+        
+        if (timeSinceLastPayload > OFFLINE_TIMEOUT_MS) {
+          console.log(`⚠️  Dashboard: No payload received for ${Math.round(timeSinceLastPayload / 1000 / 60)} minutes - marking as OFFLINE`);
+          console.log('   Setting all sensors to OFF state');
+          
+          // Mark as offline
+          setPayloadReceived(false);
+          
+          // Reset all sensors to inactive
+          setActiveSensorId(null);
+          setSwitchSensors(prevSensors => 
+            prevSensors.map(s => ({
+              ...s,
+              isActive: false
+            }))
+          );
+          
+          console.log('✅ Dashboard: All sensors reset to OFF - system marked as Offline');
+        }
+      } else if (payloadReceived && !lastPayloadTime) {
+        // If payloadReceived is true but no lastPayloadTime, reset it
+        console.log('⚠️  Dashboard: payloadReceived is true but no lastPayloadTime - resetting to offline');
+        setPayloadReceived(false);
+      }
+    };
+    
+    // Check immediately
+    checkOfflineStatus();
+    
+    // Check every 30 seconds
+    const interval = setInterval(checkOfflineStatus, 30 * 1000);
+    
+    return () => {
+      clearInterval(interval);
+    };
+  }, [payloadReceived, lastPayloadTime]);
+
+  // Update ref when switch sensors change - use length to avoid re-running on object reference changes
   useEffect(() => {
     switchSensorsRef.current = switchSensors;
-  }, [switchSensors]);
+  }, [switchSensors.length]); // Only update ref when length changes, not on every object reference change
 
   // Calculate which shift is currently active based on current time
   const getCurrentActiveShift = useMemo(() => {
@@ -588,7 +779,8 @@ const Dashboard = () => {
 
   // Calculate summary metrics - MUST be before any early returns (React Hooks rule)
   const summaryMetrics = useMemo(() => {
-    const activeSensor = switchSensors.find(s => s.isActive);
+    // Only show active sensor if payloads are being received (system is Live)
+    const activeSensor = payloadReceived ? switchSensors.find(s => s.isActive) : null;
     
     // Calculate total switches based on shift data
     // Count the number of switch activations during the selected shift
@@ -628,11 +820,11 @@ const Dashboard = () => {
     }
     
     return {
-      activeSensor: activeSensor ? activeSensor.name : 'None', // Use original database name (preserve case)
+      activeSensor: (payloadReceived && activeSensor) ? activeSensor.name : 'None', // Use original database name (preserve case)
       totalSwitches: switchCount,
       totalSensors: switchSensors.length
     };
-  }, [switchSensors, selectedShift, switchSensorData]);
+  }, [switchSensors, selectedShift, switchSensorData, payloadReceived]);
 
   if (loading) {
     return (

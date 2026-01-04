@@ -20,6 +20,8 @@ const SwitchSensors = () => {
   const [lastUpdateTime, setLastUpdateTime] = useState(null);
   const [lastPayloadTime, setLastPayloadTime] = useState(null);
   const [updateCount, setUpdateCount] = useState(0);
+  const fetchingTimelineRef = useRef(false);
+  const lastTimelineFetchRef = useRef({ date: null, sensorCount: 0 });
 
   // Initialize with 6 switch sensors (ch01-ch06)
   useEffect(() => {
@@ -56,7 +58,10 @@ const SwitchSensors = () => {
 
   // Helper function to filter data by shift hours
   const filterDataByShift = (data, shift) => {
-    if (!shift || !shift.start_time || !shift.end_time) return data;
+    if (!shift || !shift.start_time || !shift.end_time) {
+      console.log(`⚠️  filterDataByShift: No shift provided or missing times - returning all data`);
+      return data;
+    }
 
     const startTime = shift.start_time.slice(0, 5); // HH:mm
     const endTime = shift.end_time.slice(0, 5); // HH:mm
@@ -70,9 +75,23 @@ const SwitchSensors = () => {
     // Handle overnight shifts (e.g., 22:00 - 06:00)
     const isOvernight = endMinutes <= startMinutes;
 
+    console.log(`🔄 Filtering data by shift ${shift.name}: ${startTime} - ${endTime} (overnight: ${isOvernight})`);
+
     const filtered = data.filter(point => {
+      // Use timestamp if available (more accurate), otherwise parse from point.time
+      let pointMinutes;
+      
+      if (point.fullTimestamp) {
+        // Use actual timestamp (preferred method)
+        const time = new Date(point.fullTimestamp);
+        pointMinutes = time.getHours() * 60 + time.getMinutes();
+      } else if (point.timestamp) {
+        // Use timestamp string
+        const time = new Date(point.timestamp);
+        pointMinutes = time.getHours() * 60 + time.getMinutes();
+      } else if (point.time) {
       // Parse time from point.time (format: "HH:mm")
-      const timeParts = point.time ? point.time.split(':') : [];
+        const timeParts = point.time.split(':');
       if (timeParts.length < 2) return false; // Exclude if time parsing fails
       
       const hour = parseInt(timeParts[0], 10);
@@ -80,11 +99,14 @@ const SwitchSensors = () => {
       
       if (isNaN(hour) || isNaN(min)) return false; // Exclude if time parsing fails
       
-      const pointMinutes = hour * 60 + min;
+        pointMinutes = hour * 60 + min;
+      } else {
+        return false; // No time information available
+      }
 
       if (isOvernight) {
         // Overnight shift: point is valid if >= start OR <= end
-        // This includes times from start (e.g., 22:00) to end (e.g., 06:00) next day
+        // This includes times from start (e.g., 23:00) to end (e.g., 07:00) next day
         return pointMinutes >= startMinutes || pointMinutes <= endMinutes;
       } else {
         // Normal shift: point is valid if between start and end
@@ -92,13 +114,35 @@ const SwitchSensors = () => {
       }
     });
 
+    console.log(`✅ Shift filter: ${filtered.length} of ${data.length} points match shift hours`);
+
     // For overnight shifts, sort so that start time comes first (22:00 before 00:00)
     if (isOvernight && filtered.length > 0) {
       return filtered.sort((a, b) => {
+        // Use timestamp if available, otherwise parse from time string
+        let minutesA, minutesB;
+        
+        if (a.fullTimestamp) {
+          const timeA = new Date(a.fullTimestamp);
+          minutesA = timeA.getHours() * 60 + timeA.getMinutes();
+        } else if (a.timestamp) {
+          const timeA = new Date(a.timestamp);
+          minutesA = timeA.getHours() * 60 + timeA.getMinutes();
+        } else {
         const [hourA, minA] = a.time.split(':').map(Number);
+          minutesA = hourA * 60 + minA;
+        }
+        
+        if (b.fullTimestamp) {
+          const timeB = new Date(b.fullTimestamp);
+          minutesB = timeB.getHours() * 60 + timeB.getMinutes();
+        } else if (b.timestamp) {
+          const timeB = new Date(b.timestamp);
+          minutesB = timeB.getHours() * 60 + timeB.getMinutes();
+        } else {
         const [hourB, minB] = b.time.split(':').map(Number);
-        const minutesA = hourA * 60 + minA;
-        const minutesB = hourB * 60 + minB;
+          minutesB = hourB * 60 + minB;
+        }
         
         // If both are in the "evening" part (>= start), sort normally
         if (minutesA >= startMinutes && minutesB >= startMinutes) {
@@ -137,21 +181,44 @@ const SwitchSensors = () => {
   const fetchTimelineDataForDate = async () => {
     if (sensors.length === 0) return;
 
+    fetchingTimelineRef.current = true;
     try {
       console.log(`📅 Fetching timeline data for date: ${selectedDate}`);
-      const startDate = new Date(selectedDate);
-      startDate.setHours(0, 0, 0, 0);
-      const endDate = new Date(selectedDate);
-      endDate.setHours(23, 59, 59, 999);
       
-      console.log(`   Date range: ${startDate.toISOString()} to ${endDate.toISOString()}`);
+      // Use local date components to avoid timezone issues
+      const dateParts = selectedDate.split('-');
+      const year = parseInt(dateParts[0], 10);
+      const month = parseInt(dateParts[1], 10) - 1; // Month is 0-indexed
+      const day = parseInt(dateParts[2], 10);
+      
+      // Create dates in local timezone
+      const startDate = new Date(year, month, day, 0, 0, 0, 0);
+      const endDate = new Date(year, month, day, 23, 59, 59, 999);
+      
+      // Calculate timezone offset to ensure we fetch the correct UTC range
+      // getTimezoneOffset() returns minutes difference: UTC - Local (negative if local is ahead)
+      // Example: UTC+5:30 (IST) returns -330, meaning UTC is 330 minutes behind local
+      // To convert local to UTC: UTC = Local - offset = Local - (-330) = Local + 330
+      // So we SUBTRACT the negative offset (i.e., ADD it)
+      const tzOffsetMinutes = startDate.getTimezoneOffset(); // e.g., -330 for UTC+5:30
+      const tzOffsetMs = tzOffsetMinutes * 60000;
+      const startDateUTC = new Date(startDate.getTime() - tzOffsetMs); // Subtract negative = add
+      const endDateUTC = new Date(endDate.getTime() - tzOffsetMs);
+      
+      console.log(`📅 Fetching timeline data for date: ${selectedDate}`);
+      console.log(`   Local timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`);
+      console.log(`   Timezone offset: ${tzOffsetMinutes} minutes (UTC ${tzOffsetMinutes < 0 ? '+' : ''}${(tzOffsetMinutes / -60).toFixed(1)})`);
+      console.log(`   Local date range: ${startDate.toLocaleString()} to ${endDate.toLocaleString()}`);
+      console.log(`   UTC date range (for DB query): ${startDateUTC.toISOString()} to ${endDateUTC.toISOString()}`);
+      console.log(`   This ensures all records for the selected LOCAL date are fetched`);
 
-      // Fetch data for all sensors
+      // Fetch data for all sensors using UTC-adjusted dates
+      // This ensures we get all records for the selected local date regardless of timezone
       const allDataPromises = sensors.map(sensor =>
         api.get(`/data/sensor/${sensor.id}`, {
           params: {
-            start_time: startDate.toISOString(),
-            end_time: endDate.toISOString(),
+            start_time: startDateUTC.toISOString(),
+            end_time: endDateUTC.toISOString(),
             limit: 10000
           }
         }).catch(err => {
@@ -172,7 +239,24 @@ const SwitchSensors = () => {
         totalRecords += sensorData.length;
         
         sensorData.forEach(item => {
+          // Parse timestamp - database stores in UTC, convert to local timezone for display
           const time = new Date(item.timestamp);
+          
+          // Verify the timestamp falls within the selected date in LOCAL timezone
+          // This ensures we only process records for the correct local date
+          const localYear = time.getFullYear();
+          const localMonth = time.getMonth() + 1;
+          const localDay = time.getDate();
+          const selectedYear = parseInt(dateParts[0], 10);
+          const selectedMonth = parseInt(dateParts[1], 10);
+          const selectedDay = parseInt(dateParts[2], 10);
+          
+          // Only process if the record's local date matches the selected date
+          if (localYear !== selectedYear || localMonth !== selectedMonth || localDay !== selectedDay) {
+            // This record is from a different date in local timezone - skip it
+            return;
+          }
+          
           // Use actual timestamp with seconds precision to preserve all database records
           // Round to nearest 10 seconds to group very close timestamps (within same second)
           const roundedSeconds = Math.floor(time.getSeconds() / 10) * 10;
@@ -182,7 +266,7 @@ const SwitchSensors = () => {
             dataMap.set(timeKey, {
               time: `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`,
               timestamp: time.toISOString(),
-              fullTimestamp: time
+              fullTimestamp: time // Store as Date object for accurate time calculations in local timezone
             });
             // Initialize all sensors to 0 - use nameLower for data keys
             sensors.forEach(s => {
@@ -200,7 +284,7 @@ const SwitchSensors = () => {
           if (point[keyName] === 0 || time > pointTime) {
             point[keyName] = newValue;
             point.timestamp = time.toISOString(); // Update to latest timestamp
-            point.fullTimestamp = time;
+            point.fullTimestamp = time; // Store as Date object in local timezone context
           }
         });
       });
@@ -215,8 +299,33 @@ const SwitchSensors = () => {
         return timeA - timeB;
       });
 
-      console.log(`📊 Timeline array created with ${timelineArray.length} points`);
+      console.log(`✅ Timeline array created with ${timelineArray.length} points`);
+      
+      if (timelineArray.length === 0) {
+        console.warn(`⚠️  No timeline data found for date ${selectedDate}. Check:`);
+        console.warn(`   1. Database has records for this date (check UTC date range: ${startDateUTC.toISOString()} to ${endDateUTC.toISOString()})`);
+        console.warn(`   2. Sensors are configured correctly`);
+        console.warn(`   3. Date format is correct: ${selectedDate}`);
+        console.warn(`   4. Timezone: Local timezone is ${Intl.DateTimeFormat().resolvedOptions().timeZone}, offset: ${tzOffsetMinutes} minutes`);
+        console.warn(`   5. Total records fetched: ${totalRecords} (before date filtering)`);
+      } else {
+        console.log(`📊 Sample timeline points:`, timelineArray.slice(0, 5).map(p => ({
+          time: p.time,
+          timestamp: p.timestamp,
+          sensors: sensors.map(s => {
+            const key = s.nameLower || s.name.toLowerCase();
+            return `${s.name}:${p[key] || 0}`;
+          }).join(', ')
+        })));
+      }
+      
       setTimelineData(timelineArray);
+      
+      // Cache the fetch parameters
+      lastTimelineFetchRef.current = {
+        date: selectedDate,
+        sensorCount: sensors.length
+      };
 
       // Update active sensor based on latest data
       if (timelineArray.length > 0) {
@@ -237,20 +346,35 @@ const SwitchSensors = () => {
         }
       }
     } catch (error) {
-      console.error('Error fetching timeline data:', error);
+      console.error('❌ Error fetching timeline data:', error);
       setTimelineData([]);
+    } finally {
+      fetchingTimelineRef.current = false;
     }
   };
 
   // Filter timeline data based on selected shift
   useEffect(() => {
+    console.log(`🔄 Filtering timeline data for shift: ${selectedShift ? selectedShift.name : 'None'}`);
+    console.log(`   Total timeline data points: ${timelineData.length}`);
+    
     if (timelineData.length > 0 && selectedShift) {
       const filtered = filterDataByShift(timelineData, selectedShift);
+      console.log(`   Filtered data points: ${filtered.length}`);
+      console.log(`   Filtered data sample:`, filtered.slice(0, 3).map(p => ({
+        time: p.time,
+        timestamp: p.timestamp,
+        sensors: sensors.map(s => {
+          const key = s.nameLower || s.name.toLowerCase();
+          return `${s.name}:${p[key] || 0}`;
+        }).join(', ')
+      })));
       setFilteredTimelineData(filtered);
     } else {
+      console.log(`   No shift selected or no timeline data - using all data`);
       setFilteredTimelineData(timelineData);
     }
-  }, [timelineData, selectedShift]);
+  }, [timelineData, selectedShift, sensors]);
 
   const initializeSensors = async () => {
     try {
@@ -310,8 +434,27 @@ const SwitchSensors = () => {
   };
 
   // Fetch latest sensor data to determine current active sensor and check if payloads are being received
+  const fetchLatestSensorDataRef = useRef(false); // Prevent duplicate calls
+  const lastFetchTimeRef = useRef(0); // Track last fetch time for debouncing
+  
   const fetchLatestSensorData = async (sensorList) => {
     if (sensorList.length === 0) return;
+    
+    // Debounce: Don't fetch if we fetched within the last 10 seconds
+    const now = Date.now();
+    if (now - lastFetchTimeRef.current < 10000) {
+      console.log('📡 Debouncing fetchLatestSensorData - last fetch was less than 10 seconds ago');
+      return;
+    }
+    
+    // Prevent duplicate simultaneous calls
+    if (fetchLatestSensorDataRef.current) {
+      console.log('📡 Already fetching latest sensor data, skipping duplicate request');
+      return;
+    }
+    
+    fetchLatestSensorDataRef.current = true;
+    lastFetchTimeRef.current = now;
     
     try {
       const sensorIds = sensorList.map(s => s.id).join(',');
@@ -403,12 +546,16 @@ const SwitchSensors = () => {
     } catch (error) {
       console.error('❌ Error fetching latest sensor data:', error);
       console.error('  Full error:', error.response || error.message);
+    } finally {
+      fetchLatestSensorDataRef.current = false;
     }
   };
 
   // WebSocket connection for live updates
   const socketRef = useRef(null);
   const sensorsRef = useRef(sensors);
+  const isConnectingRef = useRef(false);
+  const sensorIdsRef = useRef(''); // Track sensor IDs to detect actual changes
   
   // Update ref when sensors change
   useEffect(() => {
@@ -419,20 +566,53 @@ const SwitchSensors = () => {
     const token = localStorage.getItem('token');
     const wsUrl = process.env.REACT_APP_WS_URL || 'http://localhost:5000';
     
+    // Create stable sensor IDs string for comparison
+    const currentSensorIds = sensors.map(s => s.id).sort().join(',');
+    
+    // If sensor IDs haven't changed and socket is already connected, skip
+    if (sensorIdsRef.current === currentSensorIds && socketRef.current?.connected) {
+      return;
+    }
+    
+    // Prevent duplicate connections
+    if (isConnectingRef.current || (socketRef.current && socketRef.current.connected)) {
+      console.log('🔌 WebSocket already connected or connecting, skipping...');
+      return;
+    }
+    
     console.log('🔌 Initializing WebSocket connection...');
     console.log('  - WS URL:', wsUrl);
     console.log('  - Token exists:', !!token);
-    console.log('  - Sensors count:', sensorsRef.current.length);
+    console.log('  - Sensors count:', sensors.length);
+    console.log('  - Sensor IDs:', currentSensorIds);
     
     if (!token) {
       console.error('❌ No authentication token found - WebSocket connection aborted');
       return;
     }
     
-    if (sensorsRef.current.length === 0) {
-      console.log('⏳ Waiting for sensors to load before connecting WebSocket...');
+    if (sensors.length === 0) {
+      // Clean up if no sensors
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
+      sensorIdsRef.current = '';
       return;
     }
+
+    // Clean up existing connection only if sensor IDs actually changed
+    if (socketRef.current && sensorIdsRef.current !== currentSensorIds && sensorIdsRef.current !== '') {
+      console.log('🔌 Sensor IDs changed, cleaning up old connection...');
+      console.log('   Old IDs:', sensorIdsRef.current);
+      console.log('   New IDs:', currentSensorIds);
+      socketRef.current.removeAllListeners();
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+
+    isConnectingRef.current = true;
+    sensorIdsRef.current = currentSensorIds;
 
     // Connect to WebSocket
     console.log('🔌 Connecting to WebSocket...');
@@ -446,9 +626,12 @@ const SwitchSensors = () => {
       reconnectionAttempts: Infinity, // Keep trying to reconnect
       timeout: 20000, // Connection timeout (20 seconds)
       // Force new connection
-      forceNew: false,
+      forceNew: true, // Changed to true to avoid connection reuse issues
       // Upgrade from polling to websocket
-      upgrade: true
+      upgrade: true,
+      // Add ping/pong settings for better connection stability
+      pingTimeout: 60000, // 60 seconds
+      pingInterval: 25000 // 25 seconds
     });
 
     socketRef.current = socketInstance;
@@ -456,6 +639,7 @@ const SwitchSensors = () => {
     socketInstance.on('connect', () => {
       console.log('✅✅✅ WebSocket CONNECTED for Switch Sensors');
       setWsConnected(true);
+      isConnectingRef.current = false;
       // Join all sensor rooms
       const currentSensors = sensorsRef.current;
       console.log(`✅ Joining ${currentSensors.length} sensor rooms...`);
@@ -473,6 +657,7 @@ const SwitchSensors = () => {
         description: error.description
       });
       setWsConnected(false);
+      isConnectingRef.current = false;
     });
 
     socketInstance.on('reconnect', (attemptNumber) => {
@@ -670,6 +855,7 @@ const SwitchSensors = () => {
       console.log(`❌ WebSocket DISCONNECTED. Reason: ${reason}`);
       console.log(`   Will attempt to reconnect: ${reason === 'io server disconnect' ? 'No (server disconnected)' : 'Yes'}`);
       setWsConnected(false);
+      isConnectingRef.current = false;
       
       // If server disconnected us, don't try to reconnect automatically
       if (reason === 'io server disconnect') {
@@ -677,15 +863,85 @@ const SwitchSensors = () => {
       }
     });
 
+    // Handle socket errors
+    socketInstance.on('error', (error) => {
+      console.error('❌ WebSocket error:', error);
+    });
+
     return () => {
+      isConnectingRef.current = false;
+      
       if (socketInstance) {
-        sensorsRef.current.forEach(sensor => {
-          socketInstance.emit('leave_room', `sensor_${sensor.id}`);
-        });
-        socketInstance.disconnect();
+        // Only cleanup if this is a real unmount, not just a dependency change
+        if (socketRef.current === socketInstance) {
+          console.log('🔌 Cleaning up WebSocket connection...');
+          
+          // Remove all event listeners to prevent memory leaks
+          socketInstance.removeAllListeners();
+          
+          // Leave all rooms
+          sensorsRef.current.forEach(sensor => {
+            try {
+              socketInstance.emit('leave_room', `sensor_${sensor.id}`);
+            } catch (e) {
+              console.warn('⚠️  Error leaving room:', e);
+            }
+          });
+          
+          // Disconnect if still connected
+          if (socketInstance.connected) {
+            socketInstance.disconnect();
+          }
+          
+          socketRef.current = null;
+        }
       }
     };
-  }, [sensors, selectedDate]); // Removed activeSensorId from dependencies to avoid loops
+  }, [sensors.map(s => s.id).join(',')]); // Only depend on sensor IDs, not array reference
+
+  // Periodic check for offline state - if no payload received within timeout, mark as offline
+  useEffect(() => {
+    const OFFLINE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes timeout
+    
+    const checkOfflineStatus = () => {
+      if (payloadReceived && lastPayloadTime) {
+        const timeSinceLastPayload = Date.now() - lastPayloadTime.getTime();
+        
+        if (timeSinceLastPayload > OFFLINE_TIMEOUT_MS) {
+          console.log(`⚠️  No payload received for ${Math.round(timeSinceLastPayload / 1000 / 60)} minutes - marking as OFFLINE`);
+          console.log('   Setting all sensors to OFF state');
+          
+          // Mark as offline
+          setPayloadReceived(false);
+          
+          // Reset all sensors to inactive
+          setActiveSensorId(null);
+    setSensors(prevSensors => 
+            prevSensors.map(s => ({
+              ...s,
+              isActive: false
+      }))
+    );
+          
+          console.log('✅ All sensors reset to OFF - system marked as Offline');
+        }
+      } else if (payloadReceived && !lastPayloadTime) {
+        // If payloadReceived is true but no lastPayloadTime, reset it
+        console.log('⚠️  payloadReceived is true but no lastPayloadTime - resetting to offline');
+        setPayloadReceived(false);
+      }
+    };
+    
+    // Check immediately
+    checkOfflineStatus();
+    
+    // Check every 30 seconds
+    const interval = setInterval(checkOfflineStatus, 30 * 1000);
+    
+    return () => {
+      clearInterval(interval);
+    };
+  }, [payloadReceived, lastPayloadTime]);
 
 
   // Calculate summary metrics based on filtered data
@@ -712,7 +968,47 @@ const SwitchSensors = () => {
       }
     });
 
+    // Calculate actual durations based on timestamps (not fixed 15-minute intervals)
+    // IMPORTANT: Only count durations within the shift period boundaries
     dataToUse.forEach((point, index) => {
+      // Get timestamp for current point in local timezone
+      const currentTime = point.fullTimestamp 
+        ? new Date(point.fullTimestamp) 
+        : point.timestamp 
+          ? new Date(point.timestamp) 
+          : null;
+      
+      if (!currentTime) return; // Skip if no valid timestamp
+      
+      // Get current time in local timezone
+      const currentHour = currentTime.getHours();
+      const currentMin = currentTime.getMinutes();
+      const currentMinutes = currentHour * 60 + currentMin;
+      
+      // Verify this point is within shift boundaries if shift is selected
+      if (selectedShift && selectedShift.start_time && selectedShift.end_time) {
+        const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
+        const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
+        const shiftStartMinutes = startHour * 60 + startMin;
+        const shiftEndMinutes = endHour * 60 + endMin;
+        const isOvernight = shiftEndMinutes <= shiftStartMinutes;
+        
+        // Check if point is within shift period (in local timezone)
+        let isInShift = false;
+        if (isOvernight) {
+          // Overnight shift: current time >= start OR current time <= end
+          isInShift = currentMinutes >= shiftStartMinutes || currentMinutes <= shiftEndMinutes;
+        } else {
+          // Normal shift: current time >= start AND current time <= end
+          isInShift = currentMinutes >= shiftStartMinutes && currentMinutes <= shiftEndMinutes;
+        }
+        
+        if (!isInShift) {
+          // Point is outside shift boundaries - skip it
+          return;
+        }
+      }
+      
       // Try to find active sensor by checking both original name and lowercase
       const activeSensor = sensors.find(s => {
         // Check original name first
@@ -729,30 +1025,178 @@ const SwitchSensors = () => {
         previousActiveSensor = activeSensor.name;
       }
 
-      // Calculate duration (15 minutes per interval) - use original database name
+      // Calculate duration based on actual timestamps
+      // Use the time difference between this point and the next point (or shift end)
+      // CRITICAL: Only count duration up to shift end time, not beyond
       if (activeSensor) {
-        durations[activeSensor.name] += 15; // minutes
+        let durationMinutes = 0;
+        
+        if (index < dataToUse.length - 1) {
+          // Calculate duration until next point
+          const nextPoint = dataToUse[index + 1];
+          const nextTime = nextPoint.fullTimestamp 
+            ? new Date(nextPoint.fullTimestamp) 
+            : nextPoint.timestamp 
+              ? new Date(nextPoint.timestamp) 
+              : null;
+          
+          if (nextTime) {
+            // Get next point time in local timezone
+            const nextHour = nextTime.getHours();
+            const nextMin = nextTime.getMinutes();
+            const nextMinutes = nextHour * 60 + nextMin;
+            
+            // Ensure we don't count duration beyond shift end
+            if (selectedShift && selectedShift.end_time) {
+              const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
+              const shiftEndMinutes = endHour * 60 + endMin;
+              const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
+              const shiftStartMinutes = startHour * 60 + startMin;
+              const isOvernight = shiftEndMinutes <= shiftStartMinutes;
+              
+              // Calculate shift end in absolute time
+              const shiftEndTime = new Date(currentTime);
+              shiftEndTime.setHours(endHour, endMin, 0, 0);
+              if (isOvernight && currentMinutes < shiftEndMinutes) {
+                shiftEndTime.setDate(shiftEndTime.getDate() + 1);
+              }
+              
+              // Use the minimum of: time to next point OR time to shift end
+              const timeToNextPoint = (nextTime - currentTime) / (1000 * 60);
+              const timeToShiftEnd = Math.max(0, (shiftEndTime - currentTime) / (1000 * 60));
+              durationMinutes = Math.min(timeToNextPoint, timeToShiftEnd);
+            } else {
+              durationMinutes = (nextTime - currentTime) / (1000 * 60); // Convert ms to minutes
+            }
+          } else {
+            // If no next point, calculate to shift end
+            if (selectedShift && selectedShift.end_time) {
+              const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
+              const shiftEndTime = new Date(currentTime);
+              shiftEndTime.setHours(endHour, endMin, 0, 0);
+              
+              const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
+              const shiftStartMinutes = startHour * 60 + startMin;
+              const shiftEndMinutes = endHour * 60 + endMin;
+              const isOvernight = shiftEndMinutes <= shiftStartMinutes;
+              
+              if (isOvernight && currentMinutes < shiftEndMinutes) {
+                shiftEndTime.setDate(shiftEndTime.getDate() + 1);
+              }
+              
+              durationMinutes = Math.max(0, (shiftEndTime - currentTime) / (1000 * 60));
+            } else {
+              durationMinutes = 15; // Fallback
+            }
+          }
+        } else {
+          // Last point - calculate duration until shift end (if shift selected)
+          if (selectedShift && selectedShift.end_time) {
+            // Use local time components to match shift times (which are in local timezone)
+            const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
+            const shiftEndTime = new Date(currentTime);
+            shiftEndTime.setHours(endHour, endMin, 0, 0);
+            
+            // Handle overnight shifts - shift times are in local timezone
+            const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
+            const shiftStartMinutes = startHour * 60 + startMin;
+            const shiftEndMinutes = endHour * 60 + endMin;
+            const isOvernight = shiftEndMinutes <= shiftStartMinutes;
+            
+            if (isOvernight && currentMinutes < shiftEndMinutes) {
+              // Current time is after midnight but before shift end (overnight shift)
+              shiftEndTime.setDate(shiftEndTime.getDate() + 1);
+            } else if (!isOvernight && currentMinutes >= shiftEndMinutes) {
+              // Normal shift but we're past shift end - duration should be 0
+              durationMinutes = 0;
+            } else {
+              // Calculate duration until shift end
+              durationMinutes = Math.max(0, (shiftEndTime - currentTime) / (1000 * 60));
+            }
+          } else {
+            // No shift or no timestamp - use fallback
+            durationMinutes = 15;
+          }
+        }
+        
+        // Ensure duration is non-negative and within shift bounds
+        durationMinutes = Math.max(0, durationMinutes);
+        
+        durations[activeSensor.name] = (durations[activeSensor.name] || 0) + durationMinutes;
         // Also update lowercase if different
         if (activeSensor.nameLower && activeSensor.nameLower !== activeSensor.name) {
-          durations[activeSensor.nameLower] = (durations[activeSensor.nameLower] || 0) + 15;
+          durations[activeSensor.nameLower] = (durations[activeSensor.nameLower] || 0) + durationMinutes;
         }
       }
     });
 
+    // Calculate total duration for percentage calculation
+    // ALWAYS use shift duration as the base for percentages (shift times are in local timezone)
+    let totalDurationMinutes = 0;
+    if (selectedShift && selectedShift.start_time && selectedShift.end_time) {
+      // Shift times are stored as HH:mm in local timezone
+      const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
+      const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
+      const shiftStartMinutes = startHour * 60 + startMin;
+      const shiftEndMinutes = endHour * 60 + endMin;
+      const isOvernight = shiftEndMinutes <= shiftStartMinutes;
+      
+      if (isOvernight) {
+        // Overnight shift: e.g., 22:00 - 06:00 = 8 hours = 480 minutes
+        totalDurationMinutes = (24 * 60 - shiftStartMinutes) + shiftEndMinutes;
+      } else {
+        // Normal shift: e.g., 06:00 - 14:00 = 8 hours = 480 minutes
+        totalDurationMinutes = shiftEndMinutes - shiftStartMinutes;
+      }
+      
+      console.log(`📊 Shift duration calculation:`);
+      console.log(`   Shift: ${selectedShift.name} (${selectedShift.start_time} - ${selectedShift.end_time})`);
+      console.log(`   Start minutes: ${shiftStartMinutes}, End minutes: ${shiftEndMinutes}`);
+      console.log(`   Overnight: ${isOvernight}`);
+      console.log(`   Total shift duration: ${totalDurationMinutes} minutes (${(totalDurationMinutes / 60).toFixed(2)} hours)`);
+    } else {
+      // No shift selected - use sum of all sensor durations as fallback
+      // Note: This should rarely happen as shifts should always be selected
+      console.warn('⚠️  No shift selected - using sum of sensor durations for percentage calculation');
+      Object.values(durations).forEach(duration => {
+        totalDurationMinutes += duration;
+      });
+    }
+    
     // Convert to hours and minutes - use original database names
     const formattedDurations = {};
     sensors.forEach(sensor => {
       // Use original database name for lookup
       const minutes = durations[sensor.name] || durations[sensor.nameLower] || 0;
       const hours = Math.floor(minutes / 60);
-      const mins = minutes % 60;
+      const mins = Math.round(minutes % 60);
       formattedDurations[sensor.name] = {
         hours,
         minutes: mins,
         totalMinutes: minutes,
-        percentage: dataToUse.length > 0 ? (minutes / (dataToUse.length * 15)) * 100 : 0
+        percentage: totalDurationMinutes > 0 ? (minutes / totalDurationMinutes) * 100 : 0
       };
     });
+    
+    console.log(`📊 Duration calculation summary (SHIFT-BASED):`);
+    console.log(`   Selected shift: ${selectedShift ? `${selectedShift.name} (${selectedShift.start_time} - ${selectedShift.end_time})` : 'None'}`);
+    console.log(`   Total shift duration: ${totalDurationMinutes} minutes (${(totalDurationMinutes / 60).toFixed(2)} hours)`);
+    console.log(`   Data points processed: ${dataToUse.length}`);
+    console.log(`   Sensor durations (within shift period only):`);
+    sensors.forEach(sensor => {
+      const duration = formattedDurations[sensor.name];
+      if (duration.totalMinutes > 0) {
+        console.log(`     ${sensor.name}: ${duration.hours}h ${duration.minutes}m (${duration.percentage.toFixed(2)}% of shift duration)`);
+      }
+    });
+    
+    // Verify: Sum of percentages should not exceed 100% (sensors are mutually exclusive)
+    const totalPercentage = Object.values(formattedDurations).reduce((sum, d) => sum + d.percentage, 0);
+    if (totalPercentage > 100.1) { // Allow small floating point error
+      console.warn(`⚠️  Warning: Total percentage exceeds 100%: ${totalPercentage.toFixed(2)}% - This may indicate overlapping durations`);
+    } else {
+      console.log(`   Total percentage: ${totalPercentage.toFixed(2)}% (should be ≤100% as sensors are mutually exclusive)`);
+    }
 
     // Prepare data for pie chart
     const chartData = sensors.map(sensor => ({
@@ -766,7 +1210,7 @@ const SwitchSensors = () => {
       switchCount,
       chartData
     };
-  }, [filteredTimelineData, timelineData, sensors]);
+  }, [filteredTimelineData, timelineData, sensors, selectedShift]);
 
   // Calculate which shift is currently active based on current time
   const getCurrentActiveShift = useMemo(() => {
@@ -811,34 +1255,56 @@ const SwitchSensors = () => {
 
   // Transform timeline data into horizontal bar chart format
   const timelineBarData = useMemo(() => {
-    const dataToUse = filteredTimelineData.length > 0 ? filteredTimelineData : timelineData;
+    // Use filtered data if available, otherwise fall back to all timeline data
+    // But always respect shift boundaries if shift is selected
+    let dataToUse = filteredTimelineData.length > 0 ? filteredTimelineData : timelineData;
+    
     if (!sensors.length || !selectedShift) {
+      console.log(`📊 Timeline bar data skipped: sensors=${sensors.length}, shift=${selectedShift ? 'set' : 'none'}`);
       return [];
+    }
+    
+    // Re-filter data if we're using timelineData fallback but shift is selected
+    // This ensures we only show data within shift hours
+    if (dataToUse.length > 0 && selectedShift && filteredTimelineData.length === 0) {
+      console.log(`📊 Re-filtering timeline data for shift ${selectedShift.name}...`);
+      dataToUse = filterDataByShift(dataToUse, selectedShift);
+      console.log(`   Re-filtered data points: ${dataToUse.length}`);
     }
     
     // If no data, return empty array but we'll still show the chart with all sensors
     if (!dataToUse.length) {
+      console.log(`📊 Timeline bar data: No data for date ${selectedDate}, shift ${selectedShift.name}`);
+      console.log(`   Timeline data: ${timelineData.length} points`);
+      console.log(`   Filtered timeline data: ${filteredTimelineData.length} points`);
+      console.log(`   Selected shift: ${selectedShift.name} (${selectedShift.start_time} - ${selectedShift.end_time})`);
       return [];
     }
+    
+    console.log(`📊 Processing ${dataToUse.length} timeline points for bar chart`);
+    console.log(`   Selected date: ${selectedDate}`);
+    console.log(`   Selected shift: ${selectedShift.name} (${selectedShift.start_time} - ${selectedShift.end_time})`);
 
-    // Calculate shift start time in minutes from midnight
+    // Calculate shift start time in minutes from midnight (actual clock time)
     const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
     const shiftStartMinutes = startHour * 60 + startMin;
 
-    // Calculate shift end time in minutes from midnight
+    // Calculate shift end time in minutes from midnight (actual clock time)
     const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
-    const shiftEndMinutes = endHour * 60 + endMin;
+    let shiftEndMinutes = endHour * 60 + endMin;
 
     // Check if shift is overnight
     const isOvernight = shiftEndMinutes <= shiftStartMinutes;
-    const shiftDurationMinutes = isOvernight 
-      ? (24 * 60 - shiftStartMinutes) + shiftEndMinutes 
-      : shiftEndMinutes - shiftStartMinutes;
+    if (isOvernight) {
+      // For overnight shifts, shiftEndMinutes is on the next day
+      // We'll handle this in the chart domain by adding 24 hours (1440 minutes)
+      shiftEndMinutes = shiftEndMinutes + (24 * 60);
+    }
 
-    // Convert timeline points to minutes from shift start
+    // Convert timeline points to actual clock times (minutes from midnight)
     // Use actual timestamp if available, otherwise parse from time string
     const timelinePoints = dataToUse.map(point => {
-      let pointMinutes;
+      let pointMinutes; // Minutes from midnight (0-1440)
       if (point.fullTimestamp) {
         // Use actual timestamp from database for accurate positioning
         const time = new Date(point.fullTimestamp);
@@ -855,70 +1321,121 @@ const SwitchSensors = () => {
         pointMinutes = hour * 60 + min;
       }
 
-      // Calculate minutes from shift start
-      let minutesFromStart;
-      if (isOvernight) {
-        if (pointMinutes >= shiftStartMinutes) {
-          // Point is in the same day as shift start
-          minutesFromStart = pointMinutes - shiftStartMinutes;
-        } else {
-          // Point is in the next day (morning part of overnight shift)
-          minutesFromStart = (24 * 60 - shiftStartMinutes) + pointMinutes;
-        }
-      } else {
-        minutesFromStart = pointMinutes - shiftStartMinutes;
+      // For overnight shifts, if point is before shift start (e.g., 1:00 when shift is 23:00-7:00),
+      // treat it as next day (add 24 hours)
+      let actualClockMinutes = pointMinutes;
+      if (isOvernight && pointMinutes < shiftStartMinutes) {
+        // Point is in the morning part of overnight shift (next day)
+        actualClockMinutes = pointMinutes + (24 * 60);
       }
 
       // Find which sensor is active (value = 1)
+      // Check both lowercase key and original name, and handle string/number values
       const activeSensor = sensors.find(s => {
         const keyName = s.nameLower || s.name.toLowerCase();
-        return point[keyName] === 1 || point[s.name] === 1;
+        const valueLower = point[keyName] !== undefined ? parseFloat(point[keyName]) : null;
+        const valueOriginal = point[s.name] !== undefined ? parseFloat(point[s.name]) : null;
+        // Sensor is active if value is 1 (as number, string "1", or boolean true)
+        const isActive = valueLower === 1 || valueOriginal === 1 || 
+                        point[keyName] === "1" || point[s.name] === "1" ||
+                        point[keyName] === true || point[s.name] === true;
+        return isActive;
       });
+      
+      // Debug: Log if we found an active sensor
+      if (activeSensor) {
+        const hours = Math.floor(actualClockMinutes / 60);
+        const mins = actualClockMinutes % 60;
+        const clockTime = `${String(hours % 24).padStart(2, '0')}:${String(Math.floor(mins)).padStart(2, '0')}`;
+        console.log(`   🔍 Found active sensor: ${activeSensor.name} at ${clockTime} (${actualClockMinutes} minutes from midnight)`);
+      }
 
       return {
-        minutesFromStart,
+        clockMinutes: actualClockMinutes, // Actual clock time in minutes from midnight (0-2880 for overnight shifts)
         time: point.time,
         timestamp: point.timestamp || (point.fullTimestamp ? point.fullTimestamp.toISOString() : null),
+        fullTimestamp: point.fullTimestamp,
         activeSensor: activeSensor ? activeSensor.name : null,
         activeSensorId: activeSensor ? activeSensor.id : null
       };
-    }).sort((a, b) => a.minutesFromStart - b.minutesFromStart);
+    }).filter(point => {
+      // Filter out points that are outside shift boundaries (safety check)
+      // Point should be within the shift time range (actual clock times)
+      if (selectedShift) {
+        if (isOvernight) {
+          // Overnight shift: point should be >= shiftStartMinutes OR <= original shiftEndMinutes (before adding 24h)
+          // OR >= shiftStartMinutes + 24h (for next day points)
+          const originalEndMinutes = endHour * 60 + endMin;
+          return (point.clockMinutes >= shiftStartMinutes && point.clockMinutes <= shiftEndMinutes) ||
+                 (point.clockMinutes < originalEndMinutes); // Next day points that wrapped around
+        } else {
+          // Normal shift: point should be within shift time range
+          return point.clockMinutes >= shiftStartMinutes && point.clockMinutes <= shiftEndMinutes;
+        }
+      }
+      return true;
+    }).sort((a, b) => a.clockMinutes - b.clockMinutes);
     
-    console.log(`📊 Processing ${timelinePoints.length} timeline points for chart`);
+    console.log(`📊 Processing ${timelinePoints.length} timeline points for chart (after filtering)`);
+    if (timelinePoints.length > 0) {
+      console.log(`   Sample points:`, timelinePoints.slice(0, 5).map(p => {
+        const startHours = Math.floor(p.clockMinutes / 60);
+        const startMins = Math.floor(p.clockMinutes % 60);
+        const clockTime = `${String(startHours % 24).padStart(2, '0')}:${String(startMins).padStart(2, '0')}`;
+        return {
+          time: p.time,
+          clockTime: clockTime,
+          clockMinutes: p.clockMinutes.toFixed(1),
+          activeSensor: p.activeSensor || 'None'
+        };
+      }));
+    } else {
+      console.log(`   ⚠️  No timeline points found - check:`);
+      console.log(`     1. Data exists in database for date: ${selectedDate}`);
+      console.log(`     2. Data falls within shift hours: ${selectedShift.start_time} - ${selectedShift.end_time}`);
+      console.log(`     3. Sensors have value=1 (ON) in the data`);
+      console.log(`     4. Original timelineData has ${timelineData.length} points`);
+      console.log(`     5. Filtered timelineData has ${filteredTimelineData.length} points`);
+    }
 
     // Group consecutive ON periods for each sensor
+    // Bars will use actual clock times (minutes from midnight)
     const sensorBars = [];
-    const sensorActivePeriods = {}; // Track start time for each sensor
+    const sensorActivePeriods = {}; // Track start time for each sensor (in clock minutes)
 
     timelinePoints.forEach((point, index) => {
-      // End all currently active sensors at this point
+      // End all currently active sensors at this point (mutually exclusive)
       Object.keys(sensorActivePeriods).forEach(sensorName => {
         if (sensorActivePeriods[sensorName] !== null) {
-          sensorBars.push({
-            sensor: sensorName,
-            start: sensorActivePeriods[sensorName],
-            end: point.minutesFromStart,
-            color: COLORS[sensors.findIndex(s => s.name === sensorName) % COLORS.length]
-          });
+          // Only create bar if there's a valid duration
+          if (point.clockMinutes > sensorActivePeriods[sensorName]) {
+            sensorBars.push({
+              sensor: sensorName,
+              start: sensorActivePeriods[sensorName], // Actual clock time (minutes from midnight)
+              end: point.clockMinutes, // Actual clock time (minutes from midnight)
+              color: COLORS[sensors.findIndex(s => s.name === sensorName) % COLORS.length]
+            });
+          }
           sensorActivePeriods[sensorName] = null;
         }
       });
 
       // Start new period for the active sensor at this point
       if (point.activeSensor) {
-        if (sensorActivePeriods[point.activeSensor] === null) {
-          sensorActivePeriods[point.activeSensor] = point.minutesFromStart;
+        // If sensor was not active before, start a new period
+        if (sensorActivePeriods[point.activeSensor] === null || sensorActivePeriods[point.activeSensor] === undefined) {
+          sensorActivePeriods[point.activeSensor] = point.clockMinutes;
         }
       }
     });
 
-    // Close any remaining active periods at shift end
+    // Close any remaining active periods at shift end (use actual shift end time)
     Object.keys(sensorActivePeriods).forEach(sensorName => {
       if (sensorActivePeriods[sensorName] !== null) {
         sensorBars.push({
           sensor: sensorName,
-          start: sensorActivePeriods[sensorName],
-          end: shiftDurationMinutes,
+          start: sensorActivePeriods[sensorName], // Actual clock time
+          end: shiftEndMinutes, // Actual shift end time (clock minutes)
           color: COLORS[sensors.findIndex(s => s.name === sensorName) % COLORS.length]
         });
       }
@@ -927,6 +1444,20 @@ const SwitchSensors = () => {
     // Filter out bars with zero or negative duration
     const filteredBars = sensorBars.filter(bar => bar.end > bar.start);
     console.log(`📊 Timeline bar chart: ${filteredBars.length} bars created from ${timelinePoints.length} timeline points`);
+    if (filteredBars.length > 0) {
+      console.log(`   Sample bars:`, filteredBars.slice(0, 5).map(bar => {
+        const startH = Math.floor(bar.start / 60) % 24;
+        const startM = Math.floor(bar.start % 60);
+        const endH = Math.floor(bar.end / 60) % 24;
+        const endM = Math.floor(bar.end % 60);
+        return {
+          sensor: bar.sensor,
+          start: `${String(startH).padStart(2, '0')}:${String(startM).padStart(2, '0')}`,
+          end: `${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}`,
+          duration: (bar.end - bar.start).toFixed(1) + ' min'
+        };
+      }));
+    }
     return filteredBars;
   }, [filteredTimelineData, timelineData, sensors, selectedShift]);
 
@@ -936,11 +1467,21 @@ const SwitchSensors = () => {
       const data = payload[0].payload;
       const duration = data.end - data.start;
       const hours = Math.floor(duration / 60);
-      const mins = duration % 60;
-      const startHours = Math.floor(data.start / 60);
-      const startMins = data.start % 60;
-      const endHours = Math.floor(data.end / 60);
-      const endMins = data.end % 60;
+      const mins = Math.floor(duration % 60);
+      
+      // Convert start and end times (clock minutes) to HH:mm format
+      let startHours = Math.floor(data.start / 60);
+      let startMins = Math.floor(data.start % 60);
+      let endHours = Math.floor(data.end / 60);
+      let endMins = Math.floor(data.end % 60);
+      
+      // Handle overnight shifts: wrap hours >= 24 back to 0-23
+      if (startHours >= 24) {
+        startHours = startHours % 24;
+      }
+      if (endHours >= 24) {
+        endHours = endHours % 24;
+      }
       
       return (
         <div className="bg-white p-2 border border-gray-300 shadow-md rounded">
@@ -996,7 +1537,7 @@ const SwitchSensors = () => {
                 Updates: {updateCount} | Last: {lastPayloadTime ? lastPayloadTime.toLocaleTimeString() : lastUpdateTime || 'None'}
               </div>
             )}
-            {activeSensorId && (
+            {payloadReceived && activeSensorId && (
               <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">
                 Active: {sensors.find(s => s.id === activeSensorId)?.name || 'Unknown'}
               </span>
@@ -1065,7 +1606,7 @@ const SwitchSensors = () => {
         <div className="bg-white rounded-lg shadow p-6">
           <h3 className="text-sm font-medium text-gray-500 mb-2">Active Sensor</h3>
           <p className="text-2xl font-bold text-green-600">
-            {sensors.find(s => s.id === activeSensorId)?.name || 'None'}
+            {payloadReceived && activeSensorId ? (sensors.find(s => s.id === activeSensorId)?.name || 'None') : 'None'}
           </p>
         </div>
         <div className="bg-white rounded-lg shadow p-6">
@@ -1091,85 +1632,206 @@ const SwitchSensors = () => {
           {selectedShift ? `${selectedShift.name} Sensor Activity Timeline` : 'Sensor Activity Timeline'}
         </h2>
         {selectedShift ? (
-          <div className="w-full" style={{ minHeight: '400px' }}>
-            <ResponsiveContainer width="100%" height={Math.max(400, sensors.length * 60 + 100)}>
-              <BarChart
-                layout="vertical"
-                data={timelineBarData.length > 0 ? timelineBarData : []}
-                margin={{ top: 5, right: 30, left: 100, bottom: 50 }}
-              >
-                <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={true} />
+          timelineBarData.length > 0 || timelineData.length > 0 ? (
+            <div className="w-full" style={{ minHeight: '400px' }}>
+              <ResponsiveContainer width="100%" height={Math.max(400, sensors.length * 60 + 100)}>
+                <BarChart
+                  layout="vertical"
+                  data={timelineBarData.length > 0 ? timelineBarData : []}
+                  margin={{ top: 5, right: 30, left: 100, bottom: 50 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={true} />
             <XAxis 
-                  type="number" 
-                  domain={[0, (dataMax) => {
-                    // Calculate shift duration for max domain
-                    const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
-                    const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
-                    const shiftStartMinutes = startHour * 60 + startMin;
-                    const shiftEndMinutes = endHour * 60 + endMin;
-                    const isOvernight = shiftEndMinutes <= shiftStartMinutes;
-                    const shiftDuration = isOvernight 
-                      ? (24 * 60 - shiftStartMinutes) + shiftEndMinutes 
-                      : shiftEndMinutes - shiftStartMinutes;
-                    return shiftDuration;
-                  }]}
-                  label={{ value: 'Time (Minutes into Shift)', position: 'insideBottom', offset: -10 }}
-                  tickFormatter={(value) => {
-                    const hours = Math.floor(value / 60);
-                    const mins = value % 60;
-                    if (hours > 0) {
-                      return `${hours}h ${mins}m`;
-                    }
-                    return `${mins}m`;
-                  }}
+                    type="number" 
+                    domain={(dataMin, dataMax) => {
+                      // X-axis domain: actual shift start to end times (clock hours in minutes from midnight)
+                      const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
+                      const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
+                      const shiftStartMinutes = startHour * 60 + startMin;
+                      let shiftEndMinutes = endHour * 60 + endMin;
+                      const isOvernight = shiftEndMinutes <= shiftStartMinutes;
+                      
+                      // For overnight shifts, add 24 hours to end time for chart display
+                      if (isOvernight) {
+                        shiftEndMinutes = shiftEndMinutes + (24 * 60);
+                      }
+                      
+                      return [shiftStartMinutes, shiftEndMinutes];
+                    }}
+                    label={{ value: 'Time (Clock Hours)', position: 'insideBottom', offset: -10 }}
+                    tickFormatter={(value) => {
+                      // Format as HH:mm (actual clock time)
+                      let hours = Math.floor(value / 60);
+                      const mins = Math.floor(value % 60);
+                      
+                      // Handle overnight shifts: wrap hours >= 24 back to 0-23
+                      if (hours >= 24) {
+                        hours = hours % 24;
+                      }
+                      
+                      return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+                    }}
             />
             <YAxis 
-                  dataKey="sensor" 
-                  type="category" 
-                  width={90}
-                  tick={{ fontSize: 12 }}
-                  domain={sensors.map(s => s.name)}
-                  ticks={sensors.map(s => s.name)}
-                />
-                <Tooltip content={<TimelineBarTooltip />} />
-                <Bar 
-                  dataKey="end"
-                  shape={(props) => {
-                    const { payload, x, y, width, height } = props;
-                    // width is the bar width for the 'end' value (from 0 to end)
-                    // We want a bar from 'start' to 'end'
-                    // So the actual bar width is: width * ((end - start) / end)
-                    // And the start position is: x - width + (width * (start / end))
-                    const ratio = payload.end > 0 ? payload.start / payload.end : 0;
-                    const barWidth = width * ((payload.end - payload.start) / payload.end);
-                    const startX = x - width + (width * ratio);
-                    
-                    return (
-                      <rect
-                        x={startX}
-                        y={y}
-                        width={barWidth}
-                        height={height || 20}
-                        fill={payload.color}
-                        rx={4}
-                      />
-                    );
-                  }}
-                >
-                  {timelineBarData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} />
-                  ))}
-                </Bar>
-              </BarChart>
+                    dataKey="sensor" 
+                    type="category" 
+                    width={90}
+                    tick={{ fontSize: 12 }}
+                    domain={sensors.length > 0 ? sensors.map(s => s.name) : ['']}
+                  />
+                  <Tooltip content={<TimelineBarTooltip />} />
+                  {timelineBarData.length > 0 && (
+                    <Bar 
+                      dataKey="end"
+                      shape={(props) => {
+                        const { payload, x, y, width, height, xAxis } = props;
+                        
+                        // Calculate shift domain directly since xAxis might not be available
+                        let domainStart, domainEnd;
+                        if (selectedShift && xAxis && xAxis.domain && Array.isArray(xAxis.domain)) {
+                          [domainStart, domainEnd] = xAxis.domain;
+                        } else if (selectedShift) {
+                          // Fallback: calculate domain from shift times
+                          const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
+                          const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
+                          domainStart = startHour * 60 + startMin;
+                          domainEnd = endHour * 60 + endMin;
+                          const isOvernight = domainEnd <= domainStart;
+                          if (isOvernight) {
+                            domainEnd = domainEnd + (24 * 60);
+                          }
+                        } else {
+                          // Default fallback
+                          domainStart = 0;
+                          domainEnd = 1440;
+                        }
+                        
+                        const domainRange = domainEnd - domainStart;
+                        
+                        // Try to get chart bounds from xAxis if available
+                        let chartLeft, chartWidth;
+                        if (xAxis && typeof xAxis.x === 'number' && typeof xAxis.width === 'number') {
+                          // xAxis.x is the left edge of the axis, xAxis.width is the axis width
+                          chartLeft = xAxis.x;
+                          chartWidth = xAxis.width;
+                        } else {
+                          // Fallback: use the props passed to shape function
+                          // For vertical layout, 'x' might be relative to the chart container
+                          chartLeft = 0; // We'll calculate relative to x
+                          chartWidth = width;
+                        }
+                        
+                        // In Recharts BarChart with layout="vertical" and dataKey="end":
+                        // - x represents the position where the 'end' value is plotted on the X-axis
+                        // - width is the full width available for the chart area  
+                        // - The chart area spans from (x - width) to x
+                        
+                        // Calculate ratios: where do start and end fall within the domain?
+                        // Clamp ratios to [0, 1] to ensure bars stay within chart bounds
+                        const startRatio = domainRange > 0 
+                          ? Math.max(0, Math.min(1, (payload.start - domainStart) / domainRange)) 
+                          : 0;
+                        const endRatio = domainRange > 0 
+                          ? Math.max(0, Math.min(1, (payload.end - domainStart) / domainRange)) 
+                          : 0;
+                        
+                        // Use xAxis scale function if available for accurate positioning
+                        // Otherwise fall back to manual calculation
+                        let barStartPixel, barEndPixel;
+                        let chartLeftEdge, chartRightEdge;
+                        
+                        if (xAxis && xAxis.scale && typeof xAxis.scale === 'function') {
+                          // Use the scale function - this is the most accurate method
+                          barStartPixel = xAxis.scale(payload.start);
+                          barEndPixel = xAxis.scale(payload.end);
+                          chartLeftEdge = xAxis.scale(domainStart);
+                          chartRightEdge = xAxis.scale(domainEnd);
+                        } else {
+                          // Manual calculation - CRITICAL FIX
+                          // In Recharts BarChart with layout="vertical" and dataKey="end":
+                          // The 'x' prop is the LEFT edge of where Recharts wants to draw the bar
+                          // The bar width is determined by Recharts based on the 'end' value
+                          // But we want to override this completely with our custom positioning
+                          
+                          // The chart plotting area starts at some left edge and has width 'chartWidth'
+                          // We need to find where the chart area actually starts
+                          // Since 'x' is the left edge of the bar for 'end' value, and we know the end ratio:
+                          const endValueRatio = domainRange > 0 ? (payload.end - domainStart) / domainRange : 0;
+                          
+                          // If 'x' is the left edge of the bar for 'end', then:
+                          // x = chartLeft + (endRatio * chartWidth) - (some bar width)
+                          // But we don't know the bar width Recharts calculated...
+                          
+                          // Alternative approach: 'x' might be the RIGHT edge of where Recharts wants the bar
+                          // If so: x = chartLeft + (endRatio * chartWidth)
+                          // Therefore: chartLeft = x - (endRatio * chartWidth)
+                          
+                          // SIMPLIFIED: Try treating 'x' as the left edge of the chart area directly
+                          // This is the simplest interpretation - 'x' is where the chart starts
+                          chartLeftEdge = x;
+                          chartRightEdge = x + chartWidth;
+                          
+                          // Calculate bar positions using ratios directly
+                          barStartPixel = chartLeftEdge + (chartWidth * startRatio);
+                          barEndPixel = chartLeftEdge + (chartWidth * endRatio);
+                          
+                          // If bars still appear wrong, try alternatives:
+                          // Option 1: chartLeftEdge = x - width (if x is right edge)
+                          // Option 2: chartLeftEdge = x - (chartWidth * endValueRatio) (if x is where end maps)
+                          // Option 3: chartLeftEdge = x - (chartWidth * (1 - endValueRatio)) (inverted)
+                        }
+                        
+                        const calculatedBarWidth = barEndPixel - barStartPixel;
+                        
+                        // Debug: Log first few bars to verify positioning
+                        if (payload.sensor === 'CH05' || payload.sensor === 'CH02') {
+                          console.log(`🎯 Bar Position Debug for ${payload.sensor}:`, {
+                            times: `${Math.floor(payload.start/60)%24}:${String(Math.floor(payload.start%60)).padStart(2,'0')} - ${Math.floor(payload.end/60)%24}:${String(Math.floor(payload.end%60)).padStart(2,'0')}`,
+                            domain: `${Math.floor(domainStart/60)%24}:${String(Math.floor(domainStart%60)).padStart(2,'0')} - ${Math.floor(domainEnd/60)%24}:${String(Math.floor(domainEnd%60)).padStart(2,'0')}`,
+                            ratios: `startRatio: ${startRatio.toFixed(3)}, endRatio: ${endRatio.toFixed(3)}`,
+                            chartArea: `left: ${chartLeftEdge.toFixed(0)}, right: ${chartRightEdge.toFixed(0)}, width: ${Math.abs(chartRightEdge - chartLeftEdge).toFixed(0)}`,
+                            barPosition: `start: ${barStartPixel.toFixed(0)}, end: ${barEndPixel.toFixed(0)}, width: ${calculatedBarWidth.toFixed(0)}px`,
+                            usingScale: xAxis && xAxis.scale ? 'YES (xAxis.scale)' : 'NO (manual)',
+                            rawValues: {
+                              x: x.toFixed(0),
+                              width: width.toFixed(0),
+                              payloadStart: payload.start,
+                              payloadEnd: payload.end
+                            }
+                          });
+                        }
+                        
+                        return (
+                          <rect
+                            x={barStartPixel}
+                            y={y}
+                            width={Math.max(1, calculatedBarWidth)} // Minimum 1px for visibility
+                            height={height || 20}
+                            fill={payload.color}
+                            rx={4}
+                          />
+                        );
+                      }}
+                    >
+                      {timelineBarData.map((entry, index) => (
+                        <Cell key={`cell-${index}`} />
+                      ))}
+                    </Bar>
+                  )}
+                </BarChart>
         </ResponsiveContainer>
-          </div>
-        ) : selectedShift ? (
-          <div className="flex items-center justify-center h-96 text-gray-500">
-            <div className="text-center">
-              <p className="text-lg font-semibold mb-2">No Sensor Data Available</p>
-              <p className="text-sm">No data has been recorded for the selected date and shift.</p>
             </div>
-          </div>
+          ) : (
+            <div className="flex items-center justify-center h-96 text-gray-500">
+              <div className="text-center">
+                <p className="text-lg font-semibold mb-2">No Sensor Data Available</p>
+                <p className="text-sm mb-2">No data has been recorded for the selected date ({selectedDate}) and shift ({selectedShift.name}).</p>
+                <p className="text-xs text-gray-400 mt-4">
+                  Debug Info: Timeline Data: {timelineData.length} records, Filtered: {filteredTimelineData.length} records
+                </p>
+              </div>
+            </div>
+          )
         ) : (
           <div className="flex items-center justify-center h-96 text-gray-500">
             <div className="text-center">
