@@ -52,7 +52,7 @@ const Settings = () => {
       setFormData(initialData);
       setShowForm(true);
     }
-    
+
     // Also update form data when systemSettings change (after initial load)
     if (activeTab === 'system-settings' && showForm && Object.keys(systemSettings).length > 0) {
       const updatedData = {
@@ -206,7 +206,7 @@ const Settings = () => {
 
     try {
       let submitData = { ...formData };
-      
+
       // For users, handle password field (only send if provided when editing)
       if (activeTab === 'users') {
         if (editingId && !submitData.password) {
@@ -338,7 +338,7 @@ const Settings = () => {
     if (activeTab === 'system-settings' && !showForm) {
       return null; // Will be opened by useEffect
     }
-    
+
     if (!showForm) {
       return null;
     }
@@ -519,14 +519,14 @@ const Settings = () => {
                   <option value="maintenance">Maintenance</option>
                 </select>
               </div>
-              
+
               {/* MQTT Payload Configuration Section */}
               <div className="mt-4 pt-4 border-t border-gray-200">
                 <h3 className="text-sm font-semibold text-gray-700 mb-3">MQTT Payload Configuration</h3>
-                
+
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Device ID (did) 
+                    Device ID (did)
                     <span className="text-xs text-gray-500 ml-1">e.g., "00002"</span>
                   </label>
                   <input
@@ -538,10 +538,10 @@ const Settings = () => {
                   />
                   <p className="mt-1 text-xs text-gray-500">Device ID from MQTT payload "did" field</p>
                 </div>
-                
+
                 <div className="mt-3">
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Channel Code 
+                    Channel Code
                     <span className="text-xs text-gray-500 ml-1">e.g., "s1", "s2", "s3"</span>
                   </label>
                   <select
@@ -559,10 +559,10 @@ const Settings = () => {
                   </select>
                   <p className="mt-1 text-xs text-gray-500">Channel code in payload data array (s1-s6)</p>
                 </div>
-                
+
                 <div className="mt-3">
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    MQTT Payload Topic 
+                    MQTT Payload Topic
                     <span className="text-xs text-gray-500 ml-1">e.g., "voltas"</span>
                   </label>
                   <input
@@ -703,7 +703,7 @@ const Settings = () => {
                   Changes take effect immediately after saving.
                 </p>
               </div>
-              
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Payload Timeout (minutes) *
@@ -720,11 +720,11 @@ const Settings = () => {
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
                 />
                 <p className="mt-1 text-xs text-gray-500">
-                  Time in minutes without payload before device is marked as offline. 
+                  Time in minutes without payload before device is marked as offline.
                   Should be greater than your payload sending interval. (e.g., if payloads send every 2 minutes, set to 3-5 minutes)
                 </p>
               </div>
-              
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Offline Check Interval (minutes) *
@@ -744,11 +744,11 @@ const Settings = () => {
                   How often the system checks for offline devices (in minutes). Lower values provide faster offline detection but use more resources.
                 </p>
               </div>
-              
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Heartbeat Interval (minutes) *
-                  <span className="text-xs text-gray-500 ml-2">Default: 1 minute</span>
+                  <span className="text-xs text-gray-500 ml-2">Default: 15 minutes</span>
                 </label>
                 <input
                   type="number"
@@ -761,7 +761,7 @@ const Settings = () => {
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
                 />
                 <p className="mt-1 text-xs text-gray-500">
-                  How often to insert heartbeat records when sensor values haven't changed (in minutes). 
+                  How often to insert heartbeat records when sensor values haven't changed (in minutes).
                   This ensures the system remains marked as "Live" even when sensor status is unchanged.
                 </p>
               </div>
@@ -810,8 +810,8 @@ const Settings = () => {
                   value={formData.role || 'viewer'}
                   onChange={(e) => {
                     const newRole = e.target.value;
-                    setFormData({ 
-                      ...formData, 
+                    setFormData({
+                      ...formData,
                       role: newRole,
                       // Clear shift_id if role is not operator
                       shift_id: newRole === 'operator' ? formData.shift_id : ''
@@ -887,15 +887,15 @@ const Settings = () => {
     if (activeTab === 'system-settings') {
       return null; // Don't render table for system settings
     }
-    
+
     let data = activeTab === 'clients' ? clients :
-                activeTab === 'departments' ? departments :
-                activeTab === 'locations' ? locations :
-                activeTab === 'sensors' ? sensors :
-                activeTab === 'sensor-types' ? sensorTypes :
-                activeTab === 'shifts' ? shifts :
+      activeTab === 'departments' ? departments :
+        activeTab === 'locations' ? locations :
+          activeTab === 'sensors' ? sensors :
+            activeTab === 'sensor-types' ? sensorTypes :
+              activeTab === 'shifts' ? shifts :
                 users;
-    
+
     // Sort by ID ascending as a safeguard
     data = [...data].sort((a, b) => a.id - b.id);
 
@@ -977,11 +977,10 @@ const Settings = () => {
               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.location_name || '-'}</td>
               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.sensor_type || '-'}</td>
               <td className="px-6 py-4 whitespace-nowrap">
-                <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
-                  item.status === 'active' ? 'bg-green-100 text-green-800' :
-                  item.status === 'inactive' ? 'bg-gray-100 text-gray-800' :
-                  'bg-yellow-100 text-yellow-800'
-                }`}>
+                <span className={`px-2 py-1 text-xs font-semibold rounded-full ${item.status === 'active' ? 'bg-green-100 text-green-800' :
+                    item.status === 'inactive' ? 'bg-gray-100 text-gray-800' :
+                      'bg-yellow-100 text-yellow-800'
+                  }`}>
                   {item.status}
                 </span>
               </td>
@@ -1013,9 +1012,8 @@ const Settings = () => {
               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.start_time?.slice(0, 5) || '-'}</td>
               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.end_time?.slice(0, 5) || '-'}</td>
               <td className="px-6 py-4 whitespace-nowrap">
-                <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
-                  item.is_active ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
-                }`}>
+                <span className={`px-2 py-1 text-xs font-semibold rounded-full ${item.is_active ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
+                  }`}>
                   {item.is_active ? 'Active' : 'Inactive'}
                 </span>
               </td>
@@ -1032,12 +1030,11 @@ const Settings = () => {
               <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{item.username}</td>
               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.email}</td>
               <td className="px-6 py-4 whitespace-nowrap">
-                <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
-                  item.role === 'admin' ? 'bg-purple-100 text-purple-800' :
-                  item.role === 'manager' ? 'bg-blue-100 text-blue-800' :
-                  item.role === 'operator' ? 'bg-green-100 text-green-800' :
-                  'bg-gray-100 text-gray-800'
-                }`}>
+                <span className={`px-2 py-1 text-xs font-semibold rounded-full ${item.role === 'admin' ? 'bg-purple-100 text-purple-800' :
+                    item.role === 'manager' ? 'bg-blue-100 text-blue-800' :
+                      item.role === 'operator' ? 'bg-green-100 text-green-800' :
+                        'bg-gray-100 text-gray-800'
+                  }`}>
                   {item.role}
                 </span>
               </td>

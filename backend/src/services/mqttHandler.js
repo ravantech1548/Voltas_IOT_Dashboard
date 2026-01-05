@@ -21,7 +21,7 @@ const SENSOR_CACHE_TTL = 60000; // Cache for 60 seconds
 const deviceLastPayloadTime = {}; // key: device_id, value: Date timestamp
 let PAYLOAD_TIMEOUT_MS = 5 * 60 * 1000; // Default 5 minutes timeout (will be loaded from settings)
 let OFFLINE_CHECK_INTERVAL_MS = 1 * 60 * 1000; // Default check every 1 minute (will be loaded from settings)
-let HEARTBEAT_INTERVAL_MS = 1 * 60 * 1000; // Default heartbeat interval 1 minute (will be loaded from settings)
+let HEARTBEAT_INTERVAL_MS = 15 * 60 * 1000; // Default heartbeat interval 15 minutes (will be loaded from settings)
 let offlineCheckInterval = null;
 
 /**
@@ -33,7 +33,7 @@ const loadSystemSettings = async () => {
       `SELECT setting_key, setting_value FROM system_settings 
        WHERE setting_key IN ('payload_timeout_minutes', 'offline_check_interval_minutes', 'heartbeat_interval_minutes')`
     );
-    
+
     result.rows.forEach(row => {
       const value = parseFloat(row.setting_value);
       if (!isNaN(value) && value > 0) {
@@ -84,10 +84,10 @@ const getSensorIdByName = async (sensorName) => {
   try {
     // Try case-insensitive lookup first - if multiple found, use the one with lowest ID
     const result = await pool.query(
-      'SELECT id FROM sensors WHERE LOWER(name) = LOWER($1) ORDER BY id ASC LIMIT 1', 
+      'SELECT id FROM sensors WHERE LOWER(name) = LOWER($1) ORDER BY id ASC LIMIT 1',
       [sensorName]
     );
-    
+
     if (result.rows.length > 0) {
       const sensorId = result.rows[0].id;
       // Cache both original and lowercase versions
@@ -96,7 +96,7 @@ const getSensorIdByName = async (sensorName) => {
       sensorCacheTimestamp = now;
       return sensorId;
     }
-    
+
     // If not found, refresh entire cache and try again
     await refreshSensorCache();
     // Try both exact match and lowercase match
@@ -121,18 +121,18 @@ const refreshSensorCache = async () => {
        AND s.status = 'active'
        ORDER BY s.name ASC`
     );
-    
+
     sensorNameToIdCache = {};
     sensorConfigCache = {};
     channelCodeToSensorCache = {};
     deviceIdToSensorsCache = {};
-    
+
     result.rows.forEach(row => {
       // Store name to ID mapping
       const nameLower = row.name.toLowerCase();
       sensorNameToIdCache[row.name] = row.id;
       sensorNameToIdCache[nameLower] = row.id;
-      
+
       // Store full sensor configuration
       sensorConfigCache[row.id] = {
         name: row.name,
@@ -141,7 +141,7 @@ const refreshSensorCache = async () => {
         mqtt_payload_topic: row.mqtt_payload_topic,
         status: row.status
       };
-      
+
       // Build channel_code to sensor mapping (if channel_code is configured)
       if (row.channel_code) {
         const channelLower = row.channel_code.toLowerCase();
@@ -151,7 +151,7 @@ const refreshSensorCache = async () => {
           device_id: row.device_id
         };
       }
-      
+
       // Build device_id to sensors mapping (if device_id is configured)
       if (row.device_id) {
         if (!deviceIdToSensorsCache[row.device_id]) {
@@ -164,15 +164,15 @@ const refreshSensorCache = async () => {
         });
       }
     });
-    
+
     sensorCacheTimestamp = Date.now();
-    
+
     console.log(`✓ Refreshed sensor cache: ${result.rows.length} sensors mapped`);
     result.rows.forEach(row => {
       const config = `device_id=${row.device_id || 'N/A'}, channel=${row.channel_code || 'N/A'}, topic=${row.mqtt_payload_topic || 'N/A'}`;
       console.log(`   ${row.name} (ID: ${row.id}) - ${config}`);
     });
-    
+
     // Log summary
     const withDeviceId = result.rows.filter(r => r.device_id).length;
     const withChannelCode = result.rows.filter(r => r.channel_code).length;
@@ -229,7 +229,7 @@ const getLastPayloadSnapshot = async (deviceId, sensorIds) => {
     if (!sensorIds || sensorIds.length === 0) {
       return null;
     }
-    
+
     // Get the most recent timestamp that has LIVE records for all sensors (or most sensors)
     // Only compare with LIVE payloads to ensure we're comparing the same status type
     const result = await pool.query(
@@ -248,17 +248,17 @@ const getLastPayloadSnapshot = async (deviceId, sensorIds) => {
        ORDER BY sensor_id`,
       [sensorIds, deviceId]
     );
-    
+
     if (result.rows.length === 0) {
       return null; // No previous LIVE snapshot
     }
-    
+
     // Build map of sensor_id -> value from the last LIVE snapshot
     const snapshot = {};
     result.rows.forEach(row => {
       snapshot[row.sensor_id] = parseFloat(row.value) || 0;
     });
-    
+
     return snapshot;
   } catch (error) {
     console.error(`Error getting last payload snapshot for device ${deviceId}:`, error);
@@ -280,15 +280,15 @@ const shouldInsertSensorValue = async (sensorId, newValue) => {
        LIMIT 1`,
       [sensorId]
     );
-    
+
     if (result.rows.length === 0) {
       // No previous record - insert this one
       return { shouldInsert: true, lastValue: null };
     }
-    
+
     const lastValue = parseFloat(result.rows[0].value);
     const newValueFloat = parseFloat(newValue);
-    
+
     if (lastValue !== newValueFloat) {
       // Value has changed - insert new record
       return { shouldInsert: true, lastValue };
@@ -327,16 +327,16 @@ const initializeMQTT = () => {
   mqttClient.on('connect', async () => {
     console.log('✓ Connected to MQTT broker');
     reconnectAttempts = 0; // Reset on successful connection
-    
+
     // Refresh sensor cache on connection
     await refreshSensorCache();
-    
+
     // Check initial state: if no recent payloads exist, mark all devices as offline
     await checkInitialDeviceState();
-    
+
     // Start periodic check for offline devices (no payload received)
     startOfflineCheckInterval();
-    
+
     // Periodically refresh sensor cache (every 5 minutes) to pick up configuration changes
     setInterval(async () => {
       console.log('🔄 Periodically refreshing sensor cache...');
@@ -345,16 +345,16 @@ const initializeMQTT = () => {
           .filter(c => c.mqtt_payload_topic && c.status === 'active')
           .map(c => c.mqtt_payload_topic)
       );
-      
+
       await refreshSensorCache();
-      
+
       // Check for new topics and subscribe
       const newTopics = new Set(
         Object.values(sensorConfigCache)
           .filter(c => c.mqtt_payload_topic && c.status === 'active')
           .map(c => c.mqtt_payload_topic)
       );
-      
+
       // Subscribe to newly added topics
       newTopics.forEach(topic => {
         if (!oldTopics.has(topic)) {
@@ -368,23 +368,23 @@ const initializeMQTT = () => {
         }
       });
     }, 5 * 60 * 1000); // Every 5 minutes
-    
+
     // Collect all topics to subscribe to
     const topicsSet = new Set();
-    
+
     // 1. Add topics from environment variable (MQTT_TOPIC)
     const envTopics = mqttConfig.topic.split(',').map(t => t.trim()).filter(t => t);
     envTopics.forEach(t => topicsSet.add(t));
-    
+
     // 2. Add topics from sensor mqtt_payload_topic configurations
     Object.values(sensorConfigCache).forEach(config => {
       if (config.mqtt_payload_topic && config.status === 'active') {
         topicsSet.add(config.mqtt_payload_topic);
       }
     });
-    
+
     const topics = Array.from(topicsSet);
-    
+
     // Subscribe to all collected topics
     topics.forEach((topic, index) => {
       mqttClient.subscribe(topic, (err) => {
@@ -395,7 +395,7 @@ const initializeMQTT = () => {
         }
       });
     });
-    
+
     if (topics.length === 0) {
       console.warn('⚠ No MQTT topics configured. Set MQTT_TOPIC in .env file or configure mqtt_payload_topic in sensor settings.');
     } else {
@@ -409,7 +409,7 @@ const initializeMQTT = () => {
       console.log(`\n📨 ===== MQTT MESSAGE RECEIVED =====`);
       console.log(`   Topic: ${topic}`);
       console.log(`   Message length: ${message.length} bytes`);
-      
+
       // Parse message payload
       let payload;
       try {
@@ -430,55 +430,55 @@ const initializeMQTT = () => {
       // Handle Voltas device format: { did, date, data: [{ s1, st }, { s2, st }, ...] }
       if (payload.did !== undefined && payload.data && Array.isArray(payload.data)) {
         const { did, date, data } = payload;
-        
+
         console.log(`📦 Processing device ${did} with ${data.length} sensor readings`);
         console.log(`   Date: ${date}`);
         console.log(`   Data array preview:`, data.map(r => {
           const ch = Object.keys(r).find(k => k.startsWith('s'));
           return ch ? `${ch}=${r[ch]}` : '?';
         }).join(', '));
-        
+
         // Check if device_id matches any configured sensors
         const deviceSensors = deviceIdToSensorsCache[did] || [];
         if (deviceSensors.length === 0) {
           console.warn(`⚠️  No sensors configured for device_id: ${did}. Check sensor configuration in Settings.`);
         }
-        
+
         // Process all sensor readings in the data array
         // IMPORTANT: Compare current payload with previous payload snapshot
         // Only store to database if ANY sensor value has changed from previous payload
         // If all values are same as previous payload, skip database insert
-        
+
         const statusTime = data.length > 0 && data[0].st ? data[0].st : null;
         const timestamp = parseDateTime(date, statusTime);
-        
+
         console.log(`📊 Processing payload snapshot at ${timestamp.toISOString()}`);
-        
+
         // First pass: Map all sensors from current payload
         const sensorUpdates = [];
         const sensorIds = [];
-        
+
         for (const reading of data) {
           // Find the sensor channel (s1, s2, s3, s4, s5, s6)
           const channel = Object.keys(reading).find(key => key.startsWith('s') && key.length === 2);
-          
+
           if (!channel) {
             console.warn(`⚠️  Skipping reading - no valid channel found:`, reading);
             continue; // Skip if no valid channel found
           }
-          
+
           const channelLower = channel.toLowerCase();
-          
+
           // Try to find sensor by device_id + channel_code from database configuration
           let sensorConfig = null;
           let sensorId = null;
           let sensorName = null;
-          
+
           // Method 1: Look up by device_id + channel_code (from database configuration)
-          const matchedSensor = deviceSensors.find(s => 
+          const matchedSensor = deviceSensors.find(s =>
             s.channel_code && s.channel_code.toLowerCase() === channelLower
           );
-          
+
           if (matchedSensor && sensorConfigCache[matchedSensor.sensor_id]) {
             sensorConfig = sensorConfigCache[matchedSensor.sensor_id];
             sensorId = matchedSensor.sensor_id;
@@ -515,15 +515,15 @@ const initializeMQTT = () => {
               }
             }
           }
-          
+
           if (!sensorId || !sensorName) {
             console.warn(`⚠️  Could not find sensor for device_id=${did}, channel=${channel}. Configure in Settings.`);
             continue;
           }
-          
+
           const value = parseFloat(reading[channel]);
           sensorIds.push(sensorId);
-          
+
           // Store sensor update for comparison and batch processing
           sensorUpdates.push({
             sensorId,
@@ -538,17 +538,17 @@ const initializeMQTT = () => {
               mqtt_topic: topic
             }
           });
-          
+
           console.log(`   🔄 Mapped ${sensorName} (${channel}): value=${value}, sensorId=${sensorId}`);
         }
-        
+
         // Second pass: Compare current payload with previous payload snapshot
         // Get the last complete snapshot for this device
         const previousSnapshot = await getLastPayloadSnapshot(did, sensorIds);
-        
+
         let shouldStoreSnapshot = false;
         let valueChanged = false;
-        
+
         if (!previousSnapshot) {
           // No previous snapshot - store this one (first payload)
           console.log(`📝 No previous snapshot found - storing first payload snapshot`);
@@ -557,11 +557,11 @@ const initializeMQTT = () => {
         } else {
           // Compare current payload with previous snapshot
           console.log(`🔍 Comparing current payload with previous snapshot...`);
-          
+
           for (const update of sensorUpdates) {
             const previousValue = previousSnapshot[update.sensorId];
             const currentValue = update.value;
-            
+
             if (previousValue === undefined) {
               // New sensor in payload - store
               console.log(`   🔴 New sensor ${update.sensorName} found - will store`);
@@ -578,7 +578,7 @@ const initializeMQTT = () => {
               console.log(`   ✅ ${update.sensorName}: ${currentValue} (unchanged)`);
             }
           }
-          
+
           // Even if values haven't changed, check if we need a heartbeat record
           // to prove the system is still alive (if last live record is old)
           if (!shouldStoreSnapshot) {
@@ -591,19 +591,20 @@ const initializeMQTT = () => {
                AND data_status = 'live'`,
               [sensorIds, did]
             );
-            
+
             const lastLiveTimestamp = lastLiveTimestampResult.rows[0]?.last_live_timestamp;
             if (lastLiveTimestamp) {
               const timeSinceLastLive = timestamp.getTime() - new Date(lastLiveTimestamp).getTime();
-              
+
               // If last live record is older than heartbeat interval, insert a heartbeat to prove system is alive
               // Use configurable HEARTBEAT_INTERVAL_MS from settings
               if (timeSinceLastLive > HEARTBEAT_INTERVAL_MS) {
-                console.log(`📝 Values unchanged but last live record is ${Math.round(timeSinceLastLive / 1000)}s old - inserting heartbeat record`);
+                console.log(`📝 Values unchanged but last live record is ${Math.round(timeSinceLastLive / 1000)}s old (Threshold: ${HEARTBEAT_INTERVAL_MS / 1000}s) - inserting heartbeat record`);
                 shouldStoreSnapshot = true;
                 valueChanged = false; // Mark as heartbeat, not value change
               } else {
                 console.log(`⏭️  All sensor values unchanged and recent live record exists (${Math.round(timeSinceLastLive / 1000)}s ago) - skipping database insert`);
+                shouldStoreSnapshot = false; // Explicitly set to false
               }
             } else {
               // No previous live record found - store this one as heartbeat
@@ -613,12 +614,12 @@ const initializeMQTT = () => {
             }
           }
         }
-        
+
         // Third pass: Insert ALL sensor statuses if values changed OR heartbeat needed
         // This creates a complete snapshot of all sensors at this timestamp
         if (shouldStoreSnapshot) {
           console.log(`📝 Storing complete payload snapshot at ${timestamp.toISOString()}`);
-          
+
           for (const update of sensorUpdates) {
             try {
               // Use INSERT ... ON CONFLICT to handle duplicate timestamps
@@ -635,17 +636,17 @@ const initializeMQTT = () => {
                   JSON.stringify(update.metadata)
                 ]
               );
-              
+
               console.log(`   ✅ Stored ${update.sensorName}: value=${update.value}`);
             } catch (insertError) {
               console.error(`   ❌ Error inserting data for ${update.sensorName}:`, insertError);
             }
           }
-          
+
           processedCount = sensorUpdates.length;
           const recordType = valueChanged ? 'status change' : 'heartbeat';
           console.log(`✅ Stored complete snapshot (${recordType}): ${processedCount} sensors at ${timestamp.toISOString()}`);
-          
+
           // Update last payload time for this device
           deviceLastPayloadTime[did] = timestamp;
           console.log(`📅 Updated last payload time for device ${did}: ${timestamp.toISOString()}`);
@@ -653,7 +654,7 @@ const initializeMQTT = () => {
           processedCount = sensorUpdates.length;
           console.log(`⏭️  Skipped database insert (recent live record exists) - ${processedCount} sensors in payload`);
           // Still broadcast to WebSocket for real-time updates
-          
+
           // Update last payload time even if we didn't store (payload was received)
           deviceLastPayloadTime[did] = timestamp;
         }
@@ -662,7 +663,7 @@ const initializeMQTT = () => {
         // Broadcast ALL sensor updates from this payload snapshot
         try {
           const io = getIO();
-          
+
           for (const update of sensorUpdates) {
             const roomName = `sensor_${update.sensorId}`;
             const updateData = {
@@ -676,41 +677,41 @@ const initializeMQTT = () => {
               channel_code: update.channel,
               data_status: 'live' // Always 'live' for actual payloads
             };
-            
+
             // Get number of clients in room
             const room = io.sockets.adapter.rooms.get(roomName);
             const clientCount = room ? room.size : 0;
-            
+
             // Always broadcast, even if value is 0 (so frontend knows sensor is OFF)
             io.to(roomName).emit('sensor_update', updateData);
-            
+
             console.log(`📡 Broadcasted ${update.sensorName} (${update.channel}): value=${update.value} to room "${roomName}" (${clientCount} clients)`);
-            
+
             if (clientCount === 0) {
               console.warn(`⚠️  No clients in room "${roomName}" - message was sent but not received!`);
             }
           }
-          
+
           console.log(`✅ Broadcasted ${sensorUpdates.length} sensor updates from payload snapshot at ${timestamp.toISOString()}`);
         } catch (err) {
           console.error('❌ Socket.IO broadcast error:', err);
           console.warn('Socket.IO not initialized, skipping broadcast');
         }
-        
+
         console.log(`✅ Finished processing payload from device ${did}: ${processedCount} sensors processed`);
-        
+
         console.log(`📊 Summary: Processed ${processedCount} out of ${data.length} sensor readings from device ${did}`);
         console.log(`📨 ===== END MQTT MESSAGE PROCESSING =====\n`);
-        
+
         return; // Successfully processed Voltas format
       }
 
       // Legacy format support: { sensor_id, value, timestamp, metadata }
       const { sensor_id, sensorId, value, timestamp, metadata } = payload;
-      
+
       if (sensor_id || sensorId) {
         const id = sensor_id || sensorId;
-        
+
         if (value === undefined) {
           console.error('Invalid MQTT payload: missing value', payload);
           return;
@@ -718,14 +719,14 @@ const initializeMQTT = () => {
 
         // Check if value has changed before inserting
         const { shouldInsert, lastValue } = await shouldInsertSensorValue(id, value);
-        
+
         if (shouldInsert) {
           if (lastValue === null) {
             console.log(`📝 First record for sensor ${id} - inserting value=${value}`);
           } else {
             console.log(`📝 Status change detected for sensor ${id}: ${lastValue} → ${value} - inserting`);
           }
-          
+
           // Insert into PostgreSQL - mark as 'live' since this is from actual payload
           await pool.query(
             'INSERT INTO sensor_data (sensor_id, value, timestamp, metadata, data_status) VALUES ($1, $2, $3, $4, \'live\')',
@@ -756,8 +757,8 @@ const initializeMQTT = () => {
 
         console.log(`✓ Processed MQTT message for sensor ${id}: ${value} (topic: ${topic})`);
         return;
-      } 
-      
+      }
+
       // Legacy format: Array of sensor data
       if (Array.isArray(payload)) {
         for (const item of payload) {
@@ -765,14 +766,14 @@ const initializeMQTT = () => {
           if (id !== undefined && item.value !== undefined) {
             // Check if value has changed before inserting
             const { shouldInsert, lastValue } = await shouldInsertSensorValue(id, item.value);
-            
+
             if (shouldInsert) {
               if (lastValue === null) {
                 console.log(`📝 First record for sensor ${id} - inserting value=${item.value}`);
               } else {
                 console.log(`📝 Status change detected for sensor ${id}: ${lastValue} → ${item.value} - inserting`);
               }
-              
+
               // Mark as 'live' since this is from actual payload
               await pool.query(
                 'INSERT INTO sensor_data (sensor_id, value, timestamp, metadata, data_status) VALUES ($1, $2, $3, $4, \'live\')',
@@ -786,7 +787,7 @@ const initializeMQTT = () => {
             } else {
               console.log(`⏭️  No status change for sensor ${id} (value=${item.value} unchanged) - skipping database insert`);
             }
-            
+
             try {
               const io = getIO();
               io.to(`sensor_${id}`).emit('sensor_update', {
@@ -799,13 +800,13 @@ const initializeMQTT = () => {
             } catch (err) {
               console.warn('Socket.IO not initialized, skipping broadcast');
             }
-            
+
             console.log(`✓ Processed MQTT message for sensor ${id}: ${item.value}`);
           }
         }
         return;
       }
-      
+
       // Unknown format
       console.warn('Unknown MQTT payload format. Expected Voltas format {did, date, data} or legacy formats.', payload);
     } catch (error) {
@@ -863,15 +864,15 @@ const checkInitialDeviceState = async () => {
   try {
     console.log('🔍 Checking initial device state on startup...');
     const now = new Date();
-    
+
     // Check each configured device
     for (const [deviceId, deviceSensors] of Object.entries(deviceIdToSensorsCache)) {
       if (!deviceSensors || deviceSensors.length === 0) {
         continue;
       }
-      
+
       const sensorIds = deviceSensors.map(s => s.sensor_id);
-      
+
       // Get the most recent payload timestamp for this device from database
       try {
         const result = await pool.query(
@@ -881,15 +882,15 @@ const checkInitialDeviceState = async () => {
            AND (metadata->>'device_id' = $2 OR metadata IS NULL)`,
           [sensorIds, deviceId]
         );
-        
+
         const lastTimestamp = result.rows[0]?.last_timestamp;
         const lastLiveTimestamp = result.rows[0]?.last_live_timestamp;
-        
+
         if (lastLiveTimestamp) {
           // We have a recent live payload - check if it's within timeout
           const lastLiveTime = new Date(lastLiveTimestamp);
           const timeSinceLastLive = now.getTime() - lastLiveTime.getTime();
-          
+
           if (timeSinceLastLive <= PAYLOAD_TIMEOUT_MS) {
             // Recent live payload exists - device is online
             deviceLastPayloadTime[deviceId] = lastLiveTime;
@@ -905,7 +906,7 @@ const checkInitialDeviceState = async () => {
           // We have data but no live payloads - check if last data is recent
           const lastTime = new Date(lastTimestamp);
           const timeSinceLast = now.getTime() - lastTime.getTime();
-          
+
           if (timeSinceLast > PAYLOAD_TIMEOUT_MS) {
             // Last data is too old - mark as offline
             console.log(`   ⚠️  Device ${deviceId}: Last data ${Math.round(timeSinceLast / 1000 / 60)} minutes ago (no live payloads) - marking as OFFLINE`);
@@ -924,7 +925,7 @@ const checkInitialDeviceState = async () => {
         await insertOfflineSnapshot(deviceId, sensorIds, now);
       }
     }
-    
+
     console.log('✅ Initial device state check completed');
   } catch (error) {
     console.error('❌ Error in checkInitialDeviceState:', error);
@@ -940,7 +941,7 @@ const getLastOfflineSnapshot = async (deviceId, sensorIds) => {
     if (!sensorIds || sensorIds.length === 0) {
       return null;
     }
-    
+
     // Get the most recent timestamp that has offline records for all sensors
     const result = await pool.query(
       `SELECT sensor_id, value, timestamp, data_status
@@ -958,15 +959,15 @@ const getLastOfflineSnapshot = async (deviceId, sensorIds) => {
        ORDER BY sensor_id`,
       [sensorIds, deviceId]
     );
-    
+
     if (result.rows.length === 0) {
       return null;
     }
-    
+
     // Build a map of sensor_id -> {value, data_status}
     const snapshot = {};
     let snapshotTimestamp = null;
-    
+
     result.rows.forEach(row => {
       snapshot[row.sensor_id] = {
         value: parseFloat(row.value) || 0,
@@ -974,7 +975,7 @@ const getLastOfflineSnapshot = async (deviceId, sensorIds) => {
       };
       snapshotTimestamp = row.timestamp;
     });
-    
+
     return { snapshot, timestamp: snapshotTimestamp };
   } catch (error) {
     console.error(`Error getting last offline snapshot for device ${deviceId}:`, error);
@@ -991,7 +992,7 @@ const getLastSnapshot = async (deviceId, sensorIds) => {
     if (!sensorIds || sensorIds.length === 0) {
       return null;
     }
-    
+
     // Get the most recent timestamp that has records for all sensors (or most sensors)
     const result = await pool.query(
       `SELECT sensor_id, value, timestamp, data_status
@@ -1007,16 +1008,16 @@ const getLastSnapshot = async (deviceId, sensorIds) => {
        ORDER BY sensor_id`,
       [sensorIds, deviceId]
     );
-    
+
     if (result.rows.length === 0) {
       return null;
     }
-    
+
     // Build a map of sensor_id -> {value, data_status}
     const snapshot = {};
     let snapshotTimestamp = null;
     let snapshotStatus = null;
-    
+
     result.rows.forEach(row => {
       snapshot[row.sensor_id] = {
         value: parseFloat(row.value) || 0,
@@ -1025,7 +1026,7 @@ const getLastSnapshot = async (deviceId, sensorIds) => {
       snapshotTimestamp = row.timestamp;
       snapshotStatus = row.data_status;
     });
-    
+
     return { snapshot, timestamp: snapshotTimestamp, status: snapshotStatus };
   } catch (error) {
     console.error(`Error getting last snapshot for device ${deviceId}:`, error);
@@ -1046,11 +1047,11 @@ const insertOfflineSnapshot = async (deviceId, sensorIds, timestamp) => {
 
     // Check the last snapshot (live or offline) to determine if we need to insert
     const lastSnapshot = await getLastSnapshot(deviceId, sensorIds);
-    
+
     if (lastSnapshot) {
       const { snapshot, timestamp: lastTimestamp, status: lastStatus } = lastSnapshot;
       const timeSinceLastSnapshot = timestamp.getTime() - new Date(lastTimestamp).getTime();
-      
+
       // Check if last snapshot was LIVE - if so, we're transitioning to offline → INSERT
       if (lastStatus === 'live') {
         console.log(`📝 Last snapshot was LIVE (${Math.round(timeSinceLastSnapshot / 1000 / 60)} minutes ago) - transitioning to OFFLINE - inserting offline snapshot`);
@@ -1066,7 +1067,7 @@ const insertOfflineSnapshot = async (deviceId, sensorIds, timestamp) => {
             break;
           }
         }
-        
+
         if (allSensorsAlreadyOffline) {
           // Last snapshot is already offline with all sensors = 0
           // Skip duplicate inserts unless it's been a very long time (1 hour) to maintain periodic records
@@ -1135,15 +1136,15 @@ const startOfflineCheckInterval = () => {
 
         if (timeSinceLastPayload > PAYLOAD_TIMEOUT_MS) {
           console.log(`⚠️  Device ${deviceId} has not received payload for ${Math.round(timeSinceLastPayload / 1000)}s - marking as offline`);
-          
+
           // Get all sensors for this device
           const deviceSensors = deviceIdToSensorsCache[deviceId] || [];
           if (deviceSensors.length > 0) {
             const sensorIds = deviceSensors.map(s => s.sensor_id);
-            
+
             // Insert offline snapshot (all sensors = 0)
             await insertOfflineSnapshot(deviceId, sensorIds, now);
-            
+
             // Update last payload time to prevent duplicate inserts (check again after another timeout period)
             deviceLastPayloadTime[deviceId] = new Date(now.getTime() - PAYLOAD_TIMEOUT_MS + (OFFLINE_CHECK_INTERVAL_MS * 2));
           } else {
