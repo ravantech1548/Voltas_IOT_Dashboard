@@ -9,7 +9,7 @@ const getAllSettings = async (req, res, next) => {
     const result = await pool.query(
       'SELECT setting_key, setting_value, description, updated_at FROM system_settings ORDER BY setting_key'
     );
-    
+
     // Convert array to object for easier access
     const settings = {};
     result.rows.forEach(row => {
@@ -19,7 +19,7 @@ const getAllSettings = async (req, res, next) => {
         updated_at: row.updated_at
       };
     });
-    
+
     res.json(settings);
   } catch (error) {
     console.error('Error fetching system settings:', error);
@@ -33,23 +33,23 @@ const getAllSettings = async (req, res, next) => {
 const getSetting = async (req, res, next) => {
   try {
     const { key } = req.params;
-    
+
     const result = await pool.query(
       'SELECT setting_key, setting_value, description, updated_at FROM system_settings WHERE setting_key = $1',
       [key]
     );
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Setting not found' });
     }
-    
+
     const row = result.rows[0];
-    
+
     // Reload MQTT settings if timeout/interval settings were updated
     if (['payload_timeout_minutes', 'offline_check_interval_minutes', 'heartbeat_interval_minutes'].includes(key)) {
       await reloadSystemSettings();
     }
-    
+
     res.json({
       setting_key: row.setting_key,
       setting_value: row.setting_value,
@@ -69,11 +69,11 @@ const updateSetting = async (req, res, next) => {
   try {
     const { key } = req.params;
     const { setting_value, description } = req.body;
-    
+
     if (setting_value === undefined || setting_value === null) {
       return res.status(400).json({ error: 'setting_value is required' });
     }
-    
+
     // Validate numeric settings
     if (['payload_timeout_minutes', 'offline_check_interval_minutes', 'heartbeat_interval_minutes'].includes(key)) {
       const numValue = parseFloat(setting_value);
@@ -87,7 +87,18 @@ const updateSetting = async (req, res, next) => {
         return res.status(400).json({ error: 'Value cannot exceed 60 minutes' });
       }
     }
-    
+
+    // Validate timezone setting
+    if (key === 'timezone') {
+      try {
+        // Simple check: see if Intl supports it. fallback to valid IANA string check if needed.
+        // We really only expect 'Asia/Kolkata' or 'Asia/Singapore' from the UI, but let's allow any valid one.
+        Intl.DateTimeFormat(undefined, { timeZone: setting_value });
+      } catch (e) {
+        return res.status(400).json({ error: 'Invalid timezone identifier' });
+      }
+    }
+
     const result = await pool.query(
       `UPDATE system_settings 
        SET setting_value = $1, 
@@ -97,16 +108,16 @@ const updateSetting = async (req, res, next) => {
        RETURNING setting_key, setting_value, description, updated_at`,
       [String(setting_value), description || null, key]
     );
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Setting not found' });
     }
-    
+
     // Reload MQTT settings if timeout/interval settings were updated
     if (['payload_timeout_minutes', 'offline_check_interval_minutes', 'heartbeat_interval_minutes'].includes(key)) {
       await reloadSystemSettings();
     }
-    
+
     res.json({
       setting_key: result.rows[0].setting_key,
       setting_value: result.rows[0].setting_value,
@@ -125,15 +136,15 @@ const updateSetting = async (req, res, next) => {
 const updateMultipleSettings = async (req, res, next) => {
   try {
     const { settings } = req.body;
-    
+
     if (!settings || typeof settings !== 'object') {
       return res.status(400).json({ error: 'settings object is required' });
     }
-    
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      
+
       const updated = {};
       for (const [key, value] of Object.entries(settings)) {
         // Validate numeric settings
@@ -152,7 +163,17 @@ const updateMultipleSettings = async (req, res, next) => {
             return res.status(400).json({ error: `Value for ${key} cannot exceed 60 minutes` });
           }
         }
-        
+
+        // Validate timezone
+        if (key === 'timezone') {
+          try {
+            Intl.DateTimeFormat(undefined, { timeZone: value });
+          } catch (e) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: `Invalid timezone identifier: ${value}` });
+          }
+        }
+
         const result = await client.query(
           `UPDATE system_settings 
            SET setting_value = $1, updated_at = NOW()
@@ -160,7 +181,7 @@ const updateMultipleSettings = async (req, res, next) => {
            RETURNING setting_key, setting_value, description, updated_at`,
           [String(value), key]
         );
-        
+
         if (result.rows.length > 0) {
           updated[key] = {
             setting_key: result.rows[0].setting_key,
@@ -170,17 +191,17 @@ const updateMultipleSettings = async (req, res, next) => {
           };
         }
       }
-      
+
       await client.query('COMMIT');
-      
-      // Reload MQTT settings if any timeout/interval settings were updated
-      const timeoutSettingsUpdated = Object.keys(settings).some(key => 
-        ['payload_timeout_minutes', 'offline_check_interval_minutes', 'heartbeat_interval_minutes'].includes(key)
+
+      // Reload MQTT settings if any timeout/interval/timezone settings were updated
+      const timeoutSettingsUpdated = Object.keys(settings).some(key =>
+        ['payload_timeout_minutes', 'offline_check_interval_minutes', 'heartbeat_interval_minutes', 'timezone'].includes(key)
       );
       if (timeoutSettingsUpdated) {
         await reloadSystemSettings();
       }
-      
+
       res.json({ updated, message: 'Settings updated successfully' });
     } catch (error) {
       await client.query('ROLLBACK');

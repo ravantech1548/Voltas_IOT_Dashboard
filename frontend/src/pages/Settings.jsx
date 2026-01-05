@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import api from '../utils/api';
+import { useSettings } from '../context/SettingsContext';
 
 const Settings = () => {
+  const { refreshSettings } = useSettings();
   const [activeTab, setActiveTab] = useState('clients');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -45,6 +47,7 @@ const Settings = () => {
       setEditingId('system-settings');
       // Get initial form data - use systemSettings if available, otherwise defaults
       const initialData = {
+        timezone: systemSettings.timezone?.value || 'Asia/Kolkata',
         payload_timeout_minutes: systemSettings.payload_timeout_minutes?.value || '5',
         offline_check_interval_minutes: systemSettings.offline_check_interval_minutes?.value || '1',
         heartbeat_interval_minutes: systemSettings.heartbeat_interval_minutes?.value || '1'
@@ -56,6 +59,7 @@ const Settings = () => {
     // Also update form data when systemSettings change (after initial load)
     if (activeTab === 'system-settings' && showForm && Object.keys(systemSettings).length > 0) {
       const updatedData = {
+        timezone: systemSettings.timezone?.value || 'Asia/Kolkata',
         payload_timeout_minutes: systemSettings.payload_timeout_minutes?.value || '5',
         offline_check_interval_minutes: systemSettings.offline_check_interval_minutes?.value || '1',
         heartbeat_interval_minutes: systemSettings.heartbeat_interval_minutes?.value || '1'
@@ -251,11 +255,13 @@ const Settings = () => {
             setSystemSettings(updatedSettingsRes.data);
             // Update formData with the newly saved values
             const updatedFormData = {
+              timezone: updatedSettingsRes.data.timezone?.value || 'Asia/Kolkata',
               payload_timeout_minutes: updatedSettingsRes.data.payload_timeout_minutes?.value || '5',
               offline_check_interval_minutes: updatedSettingsRes.data.offline_check_interval_minutes?.value || '1',
               heartbeat_interval_minutes: updatedSettingsRes.data.heartbeat_interval_minutes?.value || '1'
             };
             setFormData(updatedFormData);
+            await refreshSettings(); // Refresh global settings context
             break;
         }
         setSuccess(activeTab === 'system-settings' ? 'Settings updated successfully' : 'Item updated successfully');
@@ -324,6 +330,7 @@ const Settings = () => {
         return { username: '', email: '', password: '', role: 'viewer', client_id: '', shift_id: '' };
       case 'system-settings':
         return {
+          timezone: systemSettings.timezone?.value || 'Asia/Kolkata',
           payload_timeout_minutes: systemSettings.payload_timeout_minutes?.value || '5',
           offline_check_interval_minutes: systemSettings.offline_check_interval_minutes?.value || '1',
           heartbeat_interval_minutes: systemSettings.heartbeat_interval_minutes?.value || '1'
@@ -706,6 +713,25 @@ const Settings = () => {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
+                  System Timezone *
+                  <span className="text-xs text-gray-500 ml-2">Controls time display across dashboard</span>
+                </label>
+                <select
+                  required
+                  value={formData.timezone || 'Asia/Kolkata'}
+                  onChange={(e) => setFormData({ ...formData, timezone: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                >
+                  <option value="Asia/Kolkata">India (IST) - Asia/Kolkata</option>
+                  <option value="Asia/Singapore">Singapore (SGT) - Asia/Singapore</option>
+                </select>
+                <p className="mt-1 text-xs text-gray-500">
+                  Select the timezone for displaying dates and times.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
                   Payload Timeout (minutes) *
                   <span className="text-xs text-gray-500 ml-2">Default: 5 minutes</span>
                 </label>
@@ -978,8 +1004,8 @@ const Settings = () => {
               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.sensor_type || '-'}</td>
               <td className="px-6 py-4 whitespace-nowrap">
                 <span className={`px-2 py-1 text-xs font-semibold rounded-full ${item.status === 'active' ? 'bg-green-100 text-green-800' :
-                    item.status === 'inactive' ? 'bg-gray-100 text-gray-800' :
-                      'bg-yellow-100 text-yellow-800'
+                  item.status === 'inactive' ? 'bg-gray-100 text-gray-800' :
+                    'bg-yellow-100 text-yellow-800'
                   }`}>
                   {item.status}
                 </span>
@@ -1031,9 +1057,9 @@ const Settings = () => {
               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.email}</td>
               <td className="px-6 py-4 whitespace-nowrap">
                 <span className={`px-2 py-1 text-xs font-semibold rounded-full ${item.role === 'admin' ? 'bg-purple-100 text-purple-800' :
-                    item.role === 'manager' ? 'bg-blue-100 text-blue-800' :
-                      item.role === 'operator' ? 'bg-green-100 text-green-800' :
-                        'bg-gray-100 text-gray-800'
+                  item.role === 'manager' ? 'bg-blue-100 text-blue-800' :
+                    item.role === 'operator' ? 'bg-green-100 text-green-800' :
+                      'bg-gray-100 text-gray-800'
                   }`}>
                   {item.role}
                 </span>

@@ -22,6 +22,7 @@ const deviceLastPayloadTime = {}; // key: device_id, value: Date timestamp
 let PAYLOAD_TIMEOUT_MS = 5 * 60 * 1000; // Default 5 minutes timeout (will be loaded from settings)
 let OFFLINE_CHECK_INTERVAL_MS = 1 * 60 * 1000; // Default check every 1 minute (will be loaded from settings)
 let HEARTBEAT_INTERVAL_MS = 15 * 60 * 1000; // Default heartbeat interval 15 minutes (will be loaded from settings)
+let TIMEZONE = 'Asia/Kolkata'; // Default timezone
 let offlineCheckInterval = null;
 
 /**
@@ -31,10 +32,16 @@ const loadSystemSettings = async () => {
   try {
     const result = await pool.query(
       `SELECT setting_key, setting_value FROM system_settings 
-       WHERE setting_key IN ('payload_timeout_minutes', 'offline_check_interval_minutes', 'heartbeat_interval_minutes')`
+       WHERE setting_key IN ('payload_timeout_minutes', 'offline_check_interval_minutes', 'heartbeat_interval_minutes', 'timezone')`
     );
 
     result.rows.forEach(row => {
+      if (row.setting_key === 'timezone') {
+        TIMEZONE = row.setting_value;
+        console.log(`✓ Loaded timezone: ${TIMEZONE}`);
+        return;
+      }
+
       const value = parseFloat(row.setting_value);
       if (!isNaN(value) && value > 0) {
         const msValue = value * 60 * 1000; // Convert minutes to milliseconds

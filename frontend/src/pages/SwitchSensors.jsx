@@ -3,9 +3,13 @@ import { ComposedChart, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Res
 import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
 import io from 'socket.io-client';
+import { useSettings } from '../context/SettingsContext';
 
 const SwitchSensors = () => {
   const { user } = useAuth();
+  const { settings } = useSettings();
+  // Default to Asia/Kolkata if not yet loaded
+  const timezone = settings?.timezone || 'Asia/Kolkata';
   const [sensors, setSensors] = useState([]);
   const [activeSensorId, setActiveSensorId] = useState(null);
   const [timelineData, setTimelineData] = useState([]);
@@ -1356,7 +1360,17 @@ const SwitchSensors = () => {
         return h * 60 + m; // Fallback
       }
 
-      let minutes = time.getHours() * 60 + time.getMinutes() + (time.getSeconds() / 60);
+      // Convert to target timezone
+      const timeStr = time.toLocaleTimeString('en-US', {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        timeZone: timezone
+      });
+      const [h, m, s] = timeStr.split(':').map(Number);
+
+      let minutes = h * 60 + m + (s / 60);
 
       // If overnight shift, and time is early morning (e.g. 01:00) but shift started previous night (23:00)
       // Check if this point belongs to the "next day" part of the shift
@@ -1427,7 +1441,18 @@ const SwitchSensors = () => {
     // If offline, cap the valid data at lastPayloadTime
     if (!payloadReceived && lastPayloadTime) {
       const lpDate = new Date(lastPayloadTime);
-      let lpMinutes = lpDate.getHours() * 60 + lpDate.getMinutes() + (lpDate.getSeconds() / 60);
+
+      // Convert to target timezone
+      const timeStr = lpDate.toLocaleTimeString('en-US', {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        timeZone: timezone
+      });
+      const [h, m, s] = timeStr.split(':').map(Number);
+
+      let lpMinutes = h * 60 + m + (s / 60);
       if (isOvernight && lpMinutes < shiftStartMinutes) lpMinutes += 24 * 60;
 
       // If the cutoff is within the remaining segment
@@ -1468,10 +1493,10 @@ const SwitchSensors = () => {
       sensorIndex: 0 // Force all to same Y row
     }));
 
-  }, [timelineData, sensors, selectedShift, payloadReceived, lastPayloadTime]);
+  }, [timelineData, sensors, selectedShift, payloadReceived, lastPayloadTime, timezone]);
 
   // Custom tooltip for timeline bar chart
-  const TimelineBarTooltip = ({ active, payload, label }) => {
+  const TimelineBarTooltip = ({ active, payload, label, timezone }) => {
     if (active && payload && payload.length) {
       // For ReferenceArea, payload structure is different - get data from ReferenceArea props
       // Find the bar data for this sensor index (label is the sensorIndex)

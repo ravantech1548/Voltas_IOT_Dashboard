@@ -1,13 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import api from '../utils/api';
+import { useSettings } from '../context/SettingsContext';
 
 const Reports = () => {
+  const { settings } = useSettings();
+  const timezone = settings?.timezone || 'Asia/Kolkata';
   const [loading, setLoading] = useState(false);
   const [sensors, setSensors] = useState([]);
   const [reportData, setReportData] = useState([]);
   const [shifts, setShifts] = useState([]);
-  
+
   // Filter states
   const [dateFilter, setDateFilter] = useState('today'); // today, lastweek, currentmonth, custom
   const [startDate, setStartDate] = useState('');
@@ -15,7 +18,7 @@ const Reports = () => {
   const [startTime, setStartTime] = useState('');
   const [endTime, setEndTime] = useState('');
   const [selectedShiftId, setSelectedShiftId] = useState('all'); // all, 1, 2, 3, etc.
-  
+
   useEffect(() => {
     fetchSensors();
     fetchShifts();
@@ -25,7 +28,7 @@ const Reports = () => {
     if (sensors.length > 0) {
       fetchReportData();
     }
-  }, [sensors, dateFilter, startDate, endDate, startTime, endTime, selectedShiftId]);
+  }, [sensors, dateFilter, startDate, endDate, startTime, endTime, selectedShiftId, timezone]);
 
   const fetchSensors = async () => {
     try {
@@ -37,7 +40,7 @@ const Reports = () => {
           return sensorType === 'switch' && s.status === 'active';
         })
         .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-      
+
       setSensors(switchSensors);
       console.log(`📊 Loaded ${switchSensors.length} switch sensors for reports`);
     } catch (error) {
@@ -179,10 +182,23 @@ const Reports = () => {
           const timeKey = time.getTime().toString(); // Use timestamp in milliseconds for unique key
 
           if (!dataMap.has(timeKey)) {
+            // Format date and time using configured timezone
+            const dateStr = new Intl.DateTimeFormat('en-CA', {
+              timeZone: timezone
+            }).format(time); // YYYY-MM-DD format
+
+            const timeStr = time.toLocaleTimeString('en-US', {
+              hour12: false,
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+              timeZone: timezone
+            });
+
             dataMap.set(timeKey, {
               timestamp: time,
-              date: time.toISOString().split('T')[0],
-              time: `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}:${String(time.getSeconds()).padStart(2, '0')}`,
+              date: dateStr,
+              time: timeStr,
               liveStatus: null // Will be set from data_status field
             });
             // Initialize all sensors to null
@@ -195,7 +211,7 @@ const Reports = () => {
           const value = parseFloat(item.value);
           // Store the value for this sensor (may overwrite if multiple sensors update at same timestamp)
           point[sensor.name] = value;
-          
+
           // Store data_status (live/offline) - prioritize 'offline' if any sensor is offline
           if (item.data_status) {
             // Always update if we have data_status from API
@@ -207,18 +223,18 @@ const Reports = () => {
             // Default to 'live' if data_status not available (backwards compatibility)
             point.liveStatus = 'live';
           }
-          
+
           // Debug: Log data_status for first few records
           if (itemIndex < 2 && item.data_status) {
             console.log(`📊 Record ${itemIndex} data_status for ${sensor.name}:`, item.data_status, 'at', item.timestamp);
           }
         });
       });
-      
+
       console.log(`📊 Total unique timestamps: ${dataMap.size}`);
 
       // Convert map to array and sort by timestamp
-      let timelineArray = Array.from(dataMap.values()).sort((a, b) => 
+      let timelineArray = Array.from(dataMap.values()).sort((a, b) =>
         a.timestamp - b.timestamp
       );
 
@@ -249,7 +265,7 @@ const Reports = () => {
 
     // CSV headers
     const headers = ['Serial Number', 'Date', 'Time', 'Live Status', ...sensors.map(s => s.name)];
-    
+
     // CSV rows
     const rows = reportData.map((row, index) => {
       const status = row.liveStatus || 'live'; // Default to 'live' if not set
@@ -292,7 +308,7 @@ const Reports = () => {
 
     // Prepare worksheet data
     const headers = ['Serial Number', 'Date', 'Time', 'Live Status', ...sensors.map(s => s.name)];
-    
+
     const rows = reportData.map((row, index) => {
       const status = row.liveStatus || 'live'; // Default to 'live' if not set
       const liveStatus = status === 'live' ? 'Live' : status === 'offline' ? 'Offline' : 'Unknown';
@@ -311,7 +327,7 @@ const Reports = () => {
 
     // Create workbook and worksheet
     const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-    
+
     // Set column widths
     const columnWidths = [
       { wch: 12 }, // Serial Number
@@ -539,7 +555,7 @@ const Reports = () => {
                       const status = value === 1 ? 'On' : value === 0 ? 'Off' : '';
                       const bgColor = value === 1 ? 'bg-green-100' : value === 0 ? 'bg-gray-100' : 'bg-white';
                       const textColor = value === 1 ? 'text-green-800' : value === 0 ? 'text-gray-800' : 'text-gray-400';
-                      
+
                       return (
                         <td key={sensor.id} className={`px-4 py-3 whitespace-nowrap text-sm text-center ${bgColor} ${textColor} font-medium`}>
                           {status}
